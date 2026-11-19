@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { SafeAreaView, View, Text, ActivityIndicator, ImageBackground } from 'react-native';
+import { View, Text, ActivityIndicator, ImageBackground } from 'react-native';
 
 import { styles } from './src/styles';
 import { fetchProducts } from './src/api/fetchProducts';
 import { fetchCarBrands } from './src/api/fetchCarBrands';
+import { fetchCarCatalog } from './src/api/fetchCarCatalog';
 import { storage } from './src/utils/storage';
 
 import HomeScreen from './src/screens/HomeScreen';
@@ -30,6 +31,7 @@ export default function App() {
   const [garageCars, setGarageCars] = useState([]);
   const [cart, setCart] = useState([]);
   const [allProducts, setAllProducts] = useState([]);
+  const [carCatalog, setCarCatalog] = useState([]);
   const [transportCompanies, setTransportCompanies] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -64,10 +66,28 @@ export default function App() {
         if (garageData) setGarageCars(garageData);
         if (cartData) setCart(cartData);
 
-        const productsRes = await fetchProducts();
-        if (productsRes.success) setAllProducts(productsRes.data);
-
-        await fetchCarBrands();
+        const [productsRes, brandsRes, catalogRes] = await Promise.all([
+          fetchProducts(),
+          fetchCarBrands(),
+          fetchCarCatalog(),
+        ]);
+        
+        if (productsRes.success) {
+          setAllProducts(productsRes.data);
+          console.log('✅ Товары загружены:', productsRes.data.length);
+        } else {
+          console.log('❌ Товары НЕ загружены');
+        }
+        
+        if (catalogRes.success) {
+          setCarCatalog(catalogRes.data);
+          console.log('✅ КАТАЛОГ АВТО ЗАГРУЖЕН, строк:', catalogRes.data.length);
+          if (catalogRes.data.length > 0) {
+            console.log('📋 Примеры:', catalogRes.data.slice(0, 3));
+          }
+        } else {
+          console.log('❌ КАТАЛОГ АВТО НЕ ЗАГРУЖЕН');
+        }
       } catch (error) {
         console.error('Ошибка загрузки:', error);
       } finally {
@@ -85,9 +105,7 @@ export default function App() {
     setCart(prev => {
       const existing = prev.find(item => item.id === product.id);
       if (existing) {
-        return prev.map(item =>
-          item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item
-        );
+        return prev.map(item => item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item);
       }
       return [...prev, { ...product, quantity: 1 }];
     });
@@ -103,13 +121,9 @@ export default function App() {
     });
   }, []);
 
-  const onClearCart = useCallback(() => {
-    setCart([]);
-  }, []);
-
+  const onClearCart = useCallback(() => setCart([]), []);
   const onAddCar = useCallback((car) => {
-    const newCar = { ...car, id: Date.now() };
-    setGarageCars(prev => [...prev, newCar]);
+    setGarageCars(prev => [...prev, { ...car, id: Date.now() }]);
     setShowAddCarModal(false);
     showToast('Автомобиль добавлен', 'success');
   }, [showToast]);
@@ -134,10 +148,7 @@ export default function App() {
     setShowConfirmModal(true);
   }, [showToast]);
 
-  const onUpdateProfile = useCallback((newProfile) => {
-    setProfile(newProfile);
-  }, []);
-
+  const onUpdateProfile = useCallback((newProfile) => setProfile(newProfile), []);
   const onCategoryPress = useCallback((categoryName, productId = null) => {
     setSelectedCategory(categoryName);
     setHighlightProductId(productId);
@@ -155,10 +166,8 @@ export default function App() {
     setShowProductDetail(true);
   }, []);
 
-  const onCheckout = useCallback(() => {
-    setActiveTab('checkout');
-  }, []);
-
+  const onCheckout = useCallback(() => setActiveTab('checkout'), []);
+  
   const onSubmitOrder = useCallback(async (orderData) => {
     try {
       console.log('Отправка заявки:', orderData);
@@ -170,114 +179,49 @@ export default function App() {
     }
   }, [showToast]);
 
-  const onGoHome = useCallback(() => {
-    setActiveTab('home');
-  }, []);
-
-  const onRequestPart = useCallback(() => {
-    setShowRequestPartModal(true);
-  }, []);
-
-  const onRequestNewCar = useCallback(() => {
-    setShowRequestNewCarModal(true);
-  }, []);
+  const onGoHome = useCallback(() => setActiveTab('home'), []);
+  const onRequestPart = useCallback(() => setShowRequestPartModal(true), []);
+  const onRequestNewCar = useCallback(() => setShowRequestNewCarModal(true), []);
 
   if (loading) {
     return (
       <ImageBackground source={require('./assets/tank.jpg')} style={styles.background} resizeMode="cover">
-        <View style={styles.overlay}>
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color="#FF6B00" />
-            <Text style={styles.loadingText}>Загрузка...</Text>
-          </View>
+        <View style={[styles.overlay, { flex: 1, justifyContent: 'center', alignItems: 'center' }]}>
+          <ActivityIndicator size="large" color="#FF6B00" />
+          <Text style={{ color: 'white', marginTop: 10 }}>Загрузка...</Text>
         </View>
       </ImageBackground>
     );
   }
 
   const renderScreen = () => {
+    if (!activeTab) return <Text style={{color: 'white'}}>Ошибка навигации</Text>;
+
     switch (activeTab) {
       case 'home':
-        return (
-          <HomeScreen
-            onCategoryPress={onCategoryPress}
-            onViewProduct={onViewProduct}
-            searchQuery={searchQuery}
-            onSearchChange={setSearchQuery}
-            garageCars={garageCars}
-            allProducts={allProducts}
-            onRequestPart={onRequestPart}
-          />
-        );
+        return <HomeScreen onCategoryPress={onCategoryPress} onViewProduct={onViewProduct} searchQuery={searchQuery} onSearchChange={setSearchQuery} garageCars={garageCars} allProducts={allProducts} onRequestPart={onRequestPart} />;
       case 'catalog':
-        return (
-          <CatalogScreen
-            categoryName={selectedCategory}
-            onBack={onBackToHome}
-            cart={cart}
-            onAddToRequest={onAddToRequest}
-            onRemoveFromRequest={onRemoveFromRequest}
-            highlightProductId={highlightProductId}
-            garageCars={garageCars}
-            onViewProduct={onViewProduct}
-            onShowToast={showToast}
-            allProducts={allProducts}
-            onRequestPart={onRequestPart}
-          />
-        );
+        return <CatalogScreen categoryName={selectedCategory} onBack={onBackToHome} cart={cart} onAddToRequest={onAddToRequest} onRemoveFromRequest={onRemoveFromRequest} highlightProductId={highlightProductId} garageCars={garageCars} onViewProduct={onViewProduct} onShowToast={showToast} allProducts={allProducts} onRequestPart={onRequestPart} />;
       case 'cart':
-        return (
-          <CartScreen
-            cart={cart}
-            onRemove={onRemoveFromRequest}
-            onClear={onClearCart}
-            onCheckout={onCheckout}
-            onShowToast={showToast}
-            onBack={onBackToHome}
-            onRequestPart={onRequestPart}
-          />
-        );
+        return <CartScreen cart={cart} onRemove={onRemoveFromRequest} onClear={onClearCart} onCheckout={onCheckout} onShowToast={showToast} onBack={onBackToHome} onRequestPart={onRequestPart} />;
       case 'checkout':
-        return (
-          <CheckoutScreen
-            cart={cart}
-            onBack={() => setActiveTab('cart')}
-            onSubmitOrder={onSubmitOrder}
-            defaultName={profile.name}
-            defaultPhone={profile.phone}
-            onShowToast={showToast}
-            transportCompanies={transportCompanies}
-            refreshTC={() => {}}
-            garageCars={garageCars}
-          />
-        );
+        return <CheckoutScreen cart={cart} onBack={() => setActiveTab('cart')} onSubmitOrder={onSubmitOrder} defaultName={profile.name} defaultPhone={profile.phone} onShowToast={showToast} transportCompanies={transportCompanies} refreshTC={() => {}} garageCars={garageCars} />;
       case 'success':
         return <OrderSuccessScreen onGoHome={onGoHome} />;
       case 'profile':
-        return (
-          <ProfileScreen
-            profile={profile}
-            onUpdateProfile={onUpdateProfile}
-            garageCars={garageCars}
-            onAddCar={() => setShowAddCarModal(true)}
-            onEditCar={onEditCar}
-            onDeleteCar={onDeleteCar}
-            onRequestPart={onRequestPart}
-            onRequestNewCar={onRequestNewCar}
-            onShowToast={showToast}
-          />
-        );
+        return <ProfileScreen profile={profile} onUpdateProfile={onUpdateProfile} garageCars={garageCars} onAddCar={() => setShowAddCarModal(true)} onEditCar={onEditCar} onDeleteCar={onDeleteCar} onRequestPart={onRequestPart} onRequestNewCar={onRequestNewCar} onShowToast={showToast} />;
       default:
-        return null;
+        return <Text style={{color: 'white'}}>Неизвестный экран: {activeTab}</Text>;
     }
   };
 
   return (
     <ImageBackground source={require('./assets/tank.jpg')} style={styles.background} resizeMode="cover">
-      <View style={styles.overlay}>
-        <SafeAreaView style={styles.container}>
+      <View style={[styles.overlay, { flex: 1 }]}>
+        <View style={[styles.container, { flex: 1 }]}>
           <StatusBar style="light" />
-          <View style={styles.content}>
+          
+          <View style={[styles.content, { flex: 1 }]}>
             {renderScreen()}
           </View>
 
@@ -289,7 +233,13 @@ export default function App() {
             </View>
           )}
 
-          <AddCarModal visible={showAddCarModal} onClose={() => setShowAddCarModal(false)} onSave={onAddCar} />
+          <AddCarModal 
+            visible={showAddCarModal} 
+            onClose={() => setShowAddCarModal(false)} 
+            onSave={onAddCar} 
+            carCatalog={carCatalog} 
+            onRequestNewCar={onRequestNewCar} 
+          />
           <EditCarModal visible={showEditCarModal} onClose={() => { setShowEditCarModal(false); setEditingCar(null); }} onSave={onSaveEditedCar} car={editingCar} />
           <ConfirmModal visible={showConfirmModal} title="Вы уверены?" message="Это действие нельзя отменить" onCancel={() => setShowConfirmModal(false)} onConfirm={() => { if (confirmAction) confirmAction(); setShowConfirmModal(false); }} />
           <ProductDetailModal visible={showProductDetail} product={selectedProduct} onClose={() => setShowProductDetail(false)} onAddToRequest={onAddToRequest} quantity={cart.find(item => item.id === selectedProduct?.id)?.quantity || 0} />
@@ -297,7 +247,7 @@ export default function App() {
           <RequestNewCarModal visible={showRequestNewCarModal} onClose={() => setShowRequestNewCarModal(false)} onSubmit={(data) => { console.log('Запрос нового авто:', data); setShowRequestNewCarModal(false); showToast('Запрос отправлен', 'success'); }} profile={profile} />
 
           <ToastNotification message={toast.message} type={toast.type} visible={toast.visible} onHide={() => setToast({ ...toast, visible: false })} />
-        </SafeAreaView>
+        </View>
       </View>
     </ImageBackground>
   );

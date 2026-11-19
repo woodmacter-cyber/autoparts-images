@@ -1,12 +1,10 @@
 import { SCRIPT_URL } from '../config/scriptUrl';
 
-const PROXY = 'https://corsproxy.io/?';
-
 export async function fetchCarBrands() {
   try {
-    const targetUrl = encodeURIComponent(`${SCRIPT_URL}?action=getCarBrands`);
-    const response = await fetch(`${PROXY}${targetUrl}`);
+    const response = await fetch(`${SCRIPT_URL}?action=getCarBrands`);
     const data = await response.json();
+    
     if (data && typeof data === 'object' && !data.error) {
       return { success: true, data };
     }
