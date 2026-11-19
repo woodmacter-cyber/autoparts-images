@@ -1,0 +1,43 @@
+import { carMatchesAny } from './matchCarName';
+
+export const getGarageCarNames = (cars) => cars.map((c) => c.name);
+
+// Фильтрация товаров по гаражу (с учётом keywords)
+export const filterProductsByGarage = (products, garageCarNames) => {
+  if (!garageCarNames || garageCarNames.length === 0) return []; // Если гараж пуст — нет товаров
+  
+  return products.filter((p) => {
+    // Проверяем совместимость по compatibleCars
+    const byCompatible = p.compatibleCars && carMatchesAny(p.compatibleCars, garageCarNames);
+    if (byCompatible) return true;
+    
+    // Проверяем по ключевым словам (keywords)
+    if (p.keywords && p.keywords.length > 0) {
+      return garageCarNames.some((garageCar) => 
+        carMatchesAny([garageCar], p.keywords)
+      );
+    }
+    
+    return false;
+  });
+};
+
+// Поиск по всем товарам (для главной страницы)
+export const searchProducts = (query, productsByCategory, garageCarNames) => {
+  const q = String(query || '').toLowerCase().trim();
+  if (!q) return [];
+  const results = [];
+  Object.keys(productsByCategory).forEach((catName) => {
+    const products = productsByCategory[catName] || [];
+    products.forEach((product) => {
+      const inArticle = product.article.toLowerCase().includes(q);
+      const inName = product.name.toLowerCase().includes(q);
+      const inCar = product.car.toLowerCase().includes(q);
+      const inKeywords = product.keywords && product.keywords.some(k => k.toLowerCase().includes(q));
+      if (inArticle || inName || inCar || inKeywords) {
+        results.push({ ...product, categoryName: catName });
+      }
+    });
+  });
+  return results;
+};

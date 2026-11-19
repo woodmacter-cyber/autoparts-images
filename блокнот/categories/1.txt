@@ -1,0 +1,10 @@
+export const categories = [
+  { id: 1, icon: require('../../assets/engine.png'), name: 'Двигатель' },
+  { id: 2, icon: require('../../assets/suspension.png'), name: 'Подвеска' },
+  { id: 3, icon: require('../../assets/light.png'), name: 'Оптика' },
+  { id: 4, icon: require('../../assets/seat.png'), name: 'Салон' },
+  { id: 5, icon: require('../../assets/turbo.png'), name: 'Тюнинг' },
+  { id: 6, icon: require('../../assets/wheel.png'), name: 'Колёса' },
+  { id: 7, icon: require('../../assets/ecu.png'), name: 'Электроника' },
+  { id: 8, icon: require('../../assets/body.png'), name: 'Кузов' },
+];

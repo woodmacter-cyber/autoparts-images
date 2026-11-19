@@ -1,0 +1,1104 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { StyleSheet, Text, View, ImageBackground, SafeAreaView, ScrollView, TouchableOpacity, TextInput, StatusBar, Image, Alert, KeyboardAvoidingView, Platform, Modal, FlatList, Animated } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+
+import { categories } from './src/data/categories';
+import { transportCompanies } from './src/data/transportCompanies';
+import { productsByCategory } from './src/data/products';
+import { getGarageCarNames, filterProductsByGarage } from './src/utils/filterProducts';
+import { genOrderId } from './src/utils/genOrderId';
+import { storage } from './src/utils/storage';
+
+const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwul_z0dUjwOsERlbi--_sOUegcTgU4Dpx2VgcCfPQZczCtIBoa3mU18idvVPls0y6l/exec';
+
+function SmartImage({ source, fallback, size = 70 }) {
+  const [hasError, setHasError] = useState(false);
+  if (!source.uri) {
+    return <Image source={source} style={{ width: size, height: size }} resizeMode="contain" />;
+  }
+  return (
+    <View style={{ width: size, height: size, justifyContent: 'center', alignItems: 'center' }}>
+      {!hasError ? (
+        <Image source={source} style={{ width: size, height: size }} resizeMode="contain" onError={() => setHasError(true)} />
+      ) : (
+        <Image source={fallback} style={{ width: size, height: size }} resizeMode="contain" />
+      )}
+    </View>
+  );
+}
+
+function ToastNotification({ message, type, visible, onHide }) {
+  const translateY = useState(new Animated.Value(100))[0];
+  const opacity = useState(new Animated.Value(0))[0];
+
+  useEffect(() => {
+    if (visible) {
+      Animated.parallel([
+        Animated.spring(translateY, { toValue: 0, useNativeDriver: true, friction: 8 }),
+        Animated.timing(opacity, { toValue: 1, duration: 200, useNativeDriver: true }),
+      ]).start();
+
+      const timer = setTimeout(() => {
+        Animated.parallel([
+          Animated.timing(translateY, { toValue: 100, duration: 300, useNativeDriver: true }),
+          Animated.timing(opacity, { toValue: 0, duration: 300, useNativeDriver: true }),
+        ]).start(() => onHide());
+      }, 2500);
+      return () => clearTimeout(timer);
+    }
+  }, [visible]);
+
+  if (!visible) return null;
+
+  const getIcon = () => {
+    switch (type) {
+      case 'success': return { name: 'checkmark-circle', color: '#4CAF50' };
+      case 'error': return { name: 'close-circle', color: '#FF4444' };
+      case 'info': return { name: 'information-circle', color: '#2196F3' };
+      default: return { name: 'information-circle', color: '#FF6B00' };
+    }
+  };
+  const icon = getIcon();
+
+  return (
+    <Animated.View style={[styles.toastContainer, { transform: [{ translateY }], opacity }]}>
+      <View style={styles.toastContent}>
+        <Ionicons name={icon.name} size={28} color={icon.color} />
+        <Text style={styles.toastText}>{message}</Text>
+      </View>
+    </Animated.View>
+  );
+}
+
+function RequestPartModal({ visible, onClose, onSubmit, defaultCar, defaultPhone }) {
+  const [car, setCar] = useState(defaultCar || '');
+  const [part, setPart] = useState('');
+  const [comment, setComment] = useState('');
+  const [phone, setPhone] = useState(defaultPhone || '');
+
+  useEffect(() => {
+    if (visible) {
+      setCar(defaultCar || '');
+      setPart('');
+      setComment('');
+      setPhone(defaultPhone || '');
+    }
+  }, [visible]);
+
+  const handleSubmit = () => {
+    if (part.trim().length < 3) {
+      Alert.alert('Ошибка', 'Укажите название или артикул запчасти');
+      return;
+    }
+    if (phone.trim().length < 5) {
+      Alert.alert('Ошибка', 'Укажите телефон для связи');
+      return;
+    }
+    onSubmit({ car: car.trim(), part: part.trim(), comment: comment.trim(), phone: phone.trim() });
+    onClose();
+  };
+
+  return (
+    <Modal visible={visible} transparent={true} animationType="fade">
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalContent}>
+          <TouchableOpacity style={styles.closeButtonModal} onPress={onClose}>
+            <Ionicons name="close-circle" size={32} color="#888" />
+          </TouchableOpacity>
+          <Text style={styles.modalTitle}>📝 Запрос запчасти</Text>
+          <Text style={styles.modalSubtitle}>Не нашли нужную деталь? Напишите нам, и мы постараемся её найти!</Text>
+          
+          <Text style={styles.inputLabel}>Ваш автомобиль</Text>
+          <TextInput style={styles.modalInput} placeholder="Например: Honda Civic 2008" value={car} onChangeText={setCar} />
+          
+          <Text style={styles.inputLabel}>Название или артикул запчасти *</Text>
+          <TextInput style={styles.modalInput} placeholder="Например: Передний бампер" value={part} onChangeText={setPart} autoFocus />
+          
+          <Text style={styles.inputLabel}>Комментарий (необязательно)</Text>
+          <TextInput style={[styles.modalInput, { height: 80 }]} placeholder="Цвет, состояние, пожелания..." value={comment} onChangeText={setComment} multiline numberOfLines={3} />
+          
+          <Text style={styles.inputLabel}>Ваш телефон для связи *</Text>
+          <TextInput style={styles.modalInput} placeholder="+7 (999) 123-45-67" value={phone} onChangeText={setPhone} keyboardType="phone-pad" />
+
+          <View style={styles.modalButtons}>
+            <TouchableOpacity style={styles.modalButtonCancel} onPress={onClose}>
+              <Text style={styles.modalButtonCancelText}>Отмена</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.modalButtonConfirm} onPress={handleSubmit}>
+              <Text style={styles.modalButtonConfirmText}>Отправить запрос</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function ProductDetailModal({ product, onClose, onAddToCart, onShowToast }) {
+  if (!product) return null;
+  return (
+    <Modal visible={!!product} transparent={true} animationType="fade">
+      <View style={styles.detailModalOverlay}>
+        <View style={styles.detailModalContent}>
+          <TouchableOpacity style={styles.closeButton} onPress={onClose}><Ionicons name="close-circle" size={36} color="#FFF" /></TouchableOpacity>
+          <View style={styles.detailImageContainer}><SmartImage source={product.image} fallback={product.fallback} size={250} /></View>
+          <ScrollView style={styles.detailInfoContainer} showsVerticalScrollIndicator={false}>
+            <Text style={styles.detailName}>{product.name}</Text>
+            <Text style={styles.detailCar}>{product.car}</Text>
+            <View style={styles.detailArticleBadge}><Text style={styles.detailArticleText}>Артикул: {product.article}</Text></View>
+            <Text style={styles.detailPrice}>{product.price.toLocaleString('ru-RU')} ₽</Text>
+            <Text style={styles.detailDescTitle}>Описание:</Text>
+            <Text style={styles.detailDescText}>Оригинальная или высококачественная аналоговая запчасть для автомобиля {product.car}. Полностью совместима с указанными моделями. Гарантия качества.</Text>
+          </ScrollView>
+          <TouchableOpacity style={styles.detailAddButton} onPress={() => { onAddToCart(product); onShowToast('Товар добавлен в корзину', 'success'); onClose(); }}>
+            <Ionicons name="cart" size={20} color="#FFF" />
+            <Text style={styles.detailAddButtonText}>Добавить в корзину</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function OrderDetailModal({ order, onClose, onCancelOrder, onDeleteOrder, onShowToast }) {
+  const [showConfirmCancel, setShowConfirmCancel] = useState(false);
+  const [showConfirmDelete, setShowConfirmDelete] = useState(false);
+  if (!order) return null;
+
+  const handleCancel = () => { onCancelOrder(order.id); setShowConfirmCancel(false); onShowToast('Заказ отменён', 'info'); onClose(); };
+  const handleDelete = () => { onDeleteOrder(order.id); setShowConfirmDelete(false); onShowToast('Заказ удалён', 'info'); onClose(); };
+
+  return (
+    <Modal visible={!!order} transparent={true} animationType="fade">
+      <View style={styles.detailModalOverlay}>
+        <View style={[styles.detailModalContent, { maxHeight: '90%' }]}>
+          <TouchableOpacity style={styles.closeButton} onPress={onClose}><Ionicons name="close-circle" size={36} color="#FFF" /></TouchableOpacity>
+          <ScrollView style={styles.detailInfoContainer} showsVerticalScrollIndicator={false}>
+            <View style={styles.orderDetailHeader}>
+              <Text style={styles.orderDetailNumber}>Заказ #{order.id}</Text>
+              <Text style={[styles.orderDetailStatus, order.status === 'Отменен' && styles.orderStatusCancelled]}>{order.status}</Text>
+            </View>
+            <Text style={styles.orderDetailDate}>{order.date}</Text>
+            <Text style={styles.orderDetailSectionTitle}>📦 Состав заказа:</Text>
+            {order.items && order.items.length > 0 ? (
+              order.items.map((item, index) => (
+                <View key={index} style={styles.orderDetailItem}>
+                  <View style={styles.orderDetailItemImage}><SmartImage source={item.image} fallback={item.fallback} size={50} /></View>
+                  <View style={styles.orderDetailItemInfo}>
+                    <Text style={styles.orderDetailItemName}>{item.name}</Text>
+                    <Text style={styles.orderDetailItemArticle}>Арт: {item.article}</Text>
+                    <Text style={styles.orderDetailItemCar}>{item.car}</Text>
+                  </View>
+                  <View style={styles.orderDetailItemPrice}>
+                    <Text style={styles.orderDetailItemQuantity}>{item.quantity} шт.</Text>
+                    <Text style={styles.orderDetailItemTotal}>{(item.price * item.quantity).toLocaleString('ru-RU')} ₽</Text>
+                  </View>
+                </View>
+              ))
+            ) : (<Text style={styles.orderDetailEmpty}>Состав заказа не сохранен</Text>)}
+            <View style={styles.orderDetailTotal}>
+              <Text style={styles.orderDetailTotalLabel}>Итого:</Text>
+              <Text style={styles.orderDetailTotalSum}>{order.total.toLocaleString('ru-RU')} ₽</Text>
+            </View>
+            <Text style={styles.orderDetailSectionTitle}>🚚 Данные доставки:</Text>
+            <View style={styles.orderDetailInfoBlock}>
+              <Text style={styles.orderDetailInfoLabel}>Получатель:</Text><Text style={styles.orderDetailInfoText}>{order.customer || 'Не указано'}</Text>
+              <Text style={styles.orderDetailInfoLabel}>Телефон:</Text><Text style={styles.orderDetailInfoText}>{order.phone || 'Не указано'}</Text>
+              {order.transportCompany && (<><Text style={styles.orderDetailInfoLabel}>Транспортная компания:</Text><Text style={styles.orderDetailInfoText}>{order.transportCompany}</Text></>)}
+              {order.address && (<><Text style={styles.orderDetailInfoLabel}>Адрес:</Text><Text style={styles.orderDetailInfoText}>{order.address}</Text></>)}
+              {order.comment && (<><Text style={styles.orderDetailInfoLabel}>Комментарий:</Text><Text style={styles.orderDetailInfoText}>{order.comment}</Text></>)}
+            </View>
+            {order.status !== 'Отменен' && (
+              <TouchableOpacity style={styles.orderCancelButton} onPress={() => setShowConfirmCancel(true)}>
+                <Ionicons name="close-circle-outline" size={20} color="#FF4444" /><Text style={styles.orderCancelButtonText}>Отменить заказ</Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity style={styles.orderDeleteButton} onPress={() => setShowConfirmDelete(true)}>
+              <Ionicons name="trash-outline" size={20} color="#888" /><Text style={styles.orderDeleteButtonText}>Удалить из истории</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        </View>
+        {showConfirmCancel && (
+          <View style={styles.confirmOverlay}>
+            <View style={styles.confirmBox}>
+              <Ionicons name="alert-circle" size={48} color="#FF4444" />
+              <Text style={styles.confirmTitle}>Отменить заказ?</Text>
+              <Text style={styles.confirmText}>Заказ #{order.id} будет помечен как отменённый.</Text>
+              <View style={styles.confirmButtons}>
+                <TouchableOpacity style={styles.confirmCancelBtn} onPress={() => setShowConfirmCancel(false)}><Text style={styles.confirmCancelText}>Нет</Text></TouchableOpacity>
+                <TouchableOpacity style={styles.confirmOkBtn} onPress={handleCancel}><Text style={styles.confirmOkText}>Да, отменить</Text></TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        )}
+        {showConfirmDelete && (
+          <View style={styles.confirmOverlay}>
+            <View style={styles.confirmBox}>
+              <Ionicons name="trash" size={48} color="#888" />
+              <Text style={styles.confirmTitle}>Удалить заказ?</Text>
+              <Text style={styles.confirmText}>Заказ #{order.id} будет удалён из истории.</Text>
+              <View style={styles.confirmButtons}>
+                <TouchableOpacity style={styles.confirmCancelBtn} onPress={() => setShowConfirmDelete(false)}><Text style={styles.confirmCancelText}>Нет</Text></TouchableOpacity>
+                <TouchableOpacity style={styles.confirmOkBtn} onPress={handleDelete}><Text style={styles.confirmOkText}>Да, удалить</Text></TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        )}
+      </View>
+    </Modal>
+  );
+}
+
+function HomeScreen({ onCategoryPress, onViewProduct, searchQuery, onSearchChange, garageCars }) {
+  const garageCarNames = getGarageCarNames(garageCars);
+  const filteredCategories = useMemo(() => {
+    return categories.map(cat => {
+      const allProducts = productsByCategory[cat.name] || [];
+      const filtered = filterProductsByGarage(allProducts, garageCarNames);
+      return { ...cat, filteredCount: filtered.length, hasProducts: filtered.length > 0 };
+    }).filter(cat => cat.hasProducts);
+  }, [garageCars]);
+
+  const searchResults = useMemo(() => {
+    const q = String(searchQuery || '').toLowerCase().trim();
+    if (!q) return [];
+    const results = [];
+    Object.keys(productsByCategory).forEach((catName) => {
+      const products = productsByCategory[catName] || [];
+      products.forEach((product) => {
+        if (product.article.toLowerCase().includes(q) || product.name.toLowerCase().includes(q) || product.car.toLowerCase().includes(q) || (product.keywords && product.keywords.some(k => k.toLowerCase().includes(q)))) {
+          results.push({ ...product, categoryName: catName });
+        }
+      });
+    });
+    return results;
+  }, [searchQuery]);
+
+  return (
+    <ScrollView showsVerticalScrollIndicator={false}>
+      <View style={styles.header}><Text style={styles.logo}>AUTOPARTS</Text></View>
+      {garageCars.length === 0 && (
+        <View style={styles.emptyGarageBanner}>
+          <Ionicons name="car-outline" size={48} color="#FF6B00" />
+          <Text style={styles.emptyGarageTitle}>Добавьте ваш автомобиль</Text>
+          <Text style={styles.emptyGarageText}>Перейдите в профиль и добавьте авто</Text>
+        </View>
+      )}
+      {garageCars.length > 0 && (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.garageStrip}>
+          {garageCars.map((car) => (
+            <View key={car.id} style={styles.garageChip}>
+              <Ionicons name="car-sport" size={16} color="#FF6B00" />
+              <Text style={styles.garageChipText}>{car.name}</Text>
+            </View>
+          ))}
+        </ScrollView>
+      )}
+      <View style={styles.searchWrapper}>
+        <Text style={styles.searchIcon}>🔍</Text>
+        <TextInput style={styles.searchInput} placeholder="Поиск по артикулу, названию или авто..." placeholderTextColor="#999" value={searchQuery} onChangeText={onSearchChange} autoCapitalize="none" />
+        {searchQuery.length > 0 && <TouchableOpacity onPress={() => onSearchChange('')}><Ionicons name="close-circle" size={20} color="#888" /></TouchableOpacity>}
+      </View>
+
+      {searchQuery.trim().length > 0 && (
+        <View style={styles.searchResultsWrapper}>
+          <Text style={styles.searchResultsTitle}>{searchResults.length > 0 ? `Найдено: ${searchResults.length}` : 'Ничего не найдено'}</Text>
+          {searchResults.map((product) => (
+            <TouchableOpacity key={product.id} style={styles.searchResultCard} onPress={() => onCategoryPress(product.categoryName, product.id)}>
+              <TouchableOpacity onPress={() => onViewProduct(product)} style={styles.searchResultImageWrapper}><SmartImage source={product.image} fallback={product.fallback} size={60} /></TouchableOpacity>
+              <View style={styles.searchResultInfo}>
+                <Text style={styles.searchResultName}>{product.name}</Text>
+                <Text style={styles.searchResultCar}>{product.car}</Text>
+                <Text style={styles.searchResultArticle}>Арт: {product.article}</Text>
+              </View>
+              <Text style={styles.searchResultPrice}>{product.price.toLocaleString('ru-RU')} ₽</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
+
+      {searchQuery.trim().length === 0 && (
+        <>
+          {filteredCategories.length > 0 ? (
+            <View style={styles.gridWrapper}>
+              <View style={styles.grid}>
+                {filteredCategories.map((cat) => (
+                  <TouchableOpacity key={cat.id} style={styles.card} activeOpacity={0.7} onPress={() => onCategoryPress(cat.name)}>
+                    <Image source={cat.icon} style={styles.cardImage} resizeMode="contain" />
+                    <Text style={styles.cardName} numberOfLines={1} adjustsFontSizeToFit>{cat.name}</Text>
+                    <Text style={styles.cardCount}>{cat.filteredCount}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          ) : (
+            <View style={styles.emptyState}>
+              <Ionicons name="search-outline" size={64} color="#555" />
+              <Text style={styles.emptyText}>Нет товаров для ваших авто</Text>
+            </View>
+          )}
+          <View style={{ height: 40 }} />
+        </>
+      )}
+    </ScrollView>
+  );
+}
+
+function CatalogScreen({ categoryName, onBack, cart, onAddToCart, onRemoveFromCart, highlightProductId, garageCars, onViewProduct, onShowToast }) {
+  const garageCarNames = getGarageCarNames(garageCars);
+  const products = useMemo(() => filterProductsByGarage(productsByCategory[categoryName] || [], garageCarNames), [categoryName, garageCars]);
+  const getQuantity = (productId) => cart.find((i) => i.id === productId)?.quantity || 0;
+
+  const renderItem = ({ item: product }) => {
+    const quantity = getQuantity(product.id);
+    const isHighlighted = highlightProductId === product.id;
+    return (
+      <View style={[styles.productCard, isHighlighted && styles.productCardHighlighted]}>
+        <TouchableOpacity onPress={() => onViewProduct(product)} style={styles.productImageWrapper}><SmartImage source={product.image} fallback={product.fallback} size={80} /></TouchableOpacity>
+        <View style={styles.productRightSide}>
+          <View style={styles.productInfo}>
+            <Text style={styles.productName}>{product.name}</Text>
+            <Text style={styles.productCar}>{product.car}</Text>
+            <View style={styles.articleBadge}><Text style={styles.articleText}>Арт: {product.article}</Text></View>
+          </View>
+          <View style={styles.productAction}>
+            <Text style={styles.productPrice}>{product.price.toLocaleString('ru-RU')} ₽</Text>
+            {quantity > 0 ? (
+              <View style={styles.counter}>
+                <TouchableOpacity style={styles.counterButton} onPress={() => onRemoveFromCart(product.id)}><Ionicons name="remove" size={16} color="#FFF" /></TouchableOpacity>
+                <Text style={styles.counterValue}>{quantity}</Text>
+                <TouchableOpacity style={styles.counterButton} onPress={() => { onAddToCart(product); onShowToast('Количество увеличено', 'success'); }}><Ionicons name="add" size={16} color="#FFF" /></TouchableOpacity>
+              </View>
+            ) : (
+              <TouchableOpacity style={styles.addButton} onPress={() => { onAddToCart(product); onShowToast('Товар добавлен в корзину', 'success'); }}>
+                <Ionicons name="cart" size={16} color="#FFF" /><Text style={styles.addButtonText}>В корзину</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
+      </View>
+    );
+  };
+
+  return (
+    <View style={{ flex: 1 }}>
+      <View style={styles.catalogHeader}>
+        <TouchableOpacity onPress={onBack} style={styles.backButton}><Ionicons name="arrow-back" size={24} color="#FFF" /><Text style={styles.backText}>Назад</Text></TouchableOpacity>
+        <Text style={styles.catalogTitle} numberOfLines={1} adjustsFontSizeToFit>{categoryName}</Text>
+      </View>
+      {products.length > 0 ? (
+        <FlatList data={products} renderItem={renderItem} keyExtractor={(item) => item.id.toString()} contentContainerStyle={styles.productsList} showsVerticalScrollIndicator={false} />
+      ) : (
+        <View style={styles.emptyState}>
+          <Ionicons name="construct" size={64} color="#555" />
+          <Text style={styles.emptyText}>Нет товаров для ваших авто</Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+function CheckoutScreen({ cart, onBack, onSubmitOrder, defaultName, defaultPhone, onShowToast }) {
+  const [name, setName] = useState(defaultName || '');
+  const [phone, setPhone] = useState(defaultPhone || '');
+  const [selectedTC, setSelectedTC] = useState('cdek');
+  const [address, setAddress] = useState('');
+  const [comment, setComment] = useState('');
+  const [errors, setErrors] = useState({});
+  const total = useMemo(() => cart.reduce((sum, item) => sum + item.price * item.quantity, 0), [cart]);
+  const totalItems = useMemo(() => cart.reduce((sum, item) => sum + item.quantity, 0), [cart]);
+
+  const validate = () => {
+    const newErrors = {};
+    if (name.trim().length < 2) newErrors.name = 'Введите имя';
+    const phoneDigits = phone.replace(/\D/g, '');
+    if (phoneDigits.length < 10 || phoneDigits.length > 11) newErrors.phone = 'Введите 10-11 цифр';
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
+
+  const handleSubmit = () => {
+    if (validate()) {
+      const tc = transportCompanies.find(t => t.id === selectedTC);
+      onSubmitOrder({ name, phone, address, comment, total, totalItems, transportCompany: tc.name, items: [...cart] });
+    }
+  };
+
+  return (
+    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
+        <View style={styles.catalogHeader}>
+          <TouchableOpacity onPress={onBack} style={styles.backButton}><Ionicons name="arrow-back" size={24} color="#FFF" /><Text style={styles.backText}>Назад</Text></TouchableOpacity>
+          <Text style={styles.catalogTitle}>Оформление</Text>
+        </View>
+        <View style={styles.checkoutWrapper}>
+          <View style={styles.checkoutSection}>
+            <Text style={styles.checkoutSectionTitle}>Ваш заказ ({totalItems} шт.)</Text>
+            {cart.map((item) => (<View key={item.id} style={styles.checkoutItem}><Text style={styles.checkoutItemName}>{item.name}</Text><Text style={styles.checkoutItemDetails}>{item.quantity} шт. × {item.price.toLocaleString('ru-RU')} ₽</Text></View>))}
+            <View style={styles.checkoutTotalRow}><Text style={styles.checkoutTotalLabel}>Итого:</Text><Text style={styles.checkoutTotalSum}>{total.toLocaleString('ru-RU')} ₽</Text></View>
+          </View>
+          <View style={styles.checkoutSection}>
+            <Text style={styles.checkoutSectionTitle}>Данные доставки</Text>
+            <Text style={styles.inputLabel}>Имя *</Text>
+            <TextInput style={[styles.checkoutInput, errors.name && styles.inputError]} placeholder="Иван Иванов" placeholderTextColor="#888" value={name} onChangeText={setName} />
+            {errors.name && <Text style={styles.errorText}>{errors.name}</Text>}
+            <Text style={styles.inputLabel}>Телефон *</Text>
+            <TextInput style={[styles.checkoutInput, errors.phone && styles.inputError]} placeholder="+7 (999) 123-45-67" placeholderTextColor="#888" value={phone} onChangeText={setPhone} keyboardType="phone-pad" />
+            {errors.phone && <Text style={styles.errorText}>{errors.phone}</Text>}
+            <Text style={styles.inputLabel}>Транспортная компания *</Text>
+            <View style={styles.tcList}>
+              {transportCompanies.map((tc) => (
+                <TouchableOpacity key={tc.id} style={[styles.tcOption, selectedTC === tc.id && styles.tcOptionSelected]} onPress={() => setSelectedTC(tc.id)}>
+                  <View style={styles.tcRadio}>{selectedTC === tc.id && <View style={styles.tcRadioDot} />}</View>
+                  <View style={styles.tcInfo}><Text style={[styles.tcName, selectedTC === tc.id && styles.tcNameSelected]}>{tc.name}</Text><Text style={styles.tcCity}>{tc.city}</Text></View>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <Text style={styles.inputLabel}>Адрес доставки (необязательно)</Text>
+            <TextInput style={styles.checkoutInput} placeholder="Улица, дом, квартира" placeholderTextColor="#888" value={address} onChangeText={setAddress} multiline />
+            <Text style={styles.inputLabel}>Комментарий (необязательно)</Text>
+            <TextInput style={styles.checkoutInput} placeholder="Подъезд, код домофона..." placeholderTextColor="#888" value={comment} onChangeText={setComment} multiline numberOfLines={3} />
+          </View>
+          <TouchableOpacity style={styles.submitButton} onPress={handleSubmit}><Text style={styles.submitButtonText}>Подтвердить заказ</Text></TouchableOpacity>
+        </View>
+      </ScrollView>
+    </KeyboardAvoidingView>
+  );
+}
+
+function OrderSuccessScreen({ onGoHome }) {
+  return (
+    <View style={styles.successContainer}>
+      <Ionicons name="checkmark-circle" size={100} color="#4CAF50" />
+      <Text style={styles.successTitle}>Заказ оформлен!</Text>
+      <Text style={styles.successText}>Менеджер свяжется с вами в течение 30 минут.</Text>
+      <TouchableOpacity style={styles.successButton} onPress={onGoHome}><Text style={styles.successButtonText}>На главную</Text></TouchableOpacity>
+    </View>
+  );
+}
+
+function CartScreen({ cart, onRemove, onClear, onCheckout, onShowToast }) {
+  const total = useMemo(() => cart.reduce((sum, item) => sum + item.price * item.quantity, 0), [cart]);
+  const totalItems = useMemo(() => cart.reduce((sum, item) => sum + item.quantity, 0), [cart]);
+
+  if (cart.length === 0) {
+    return (<View style={styles.screenContainer}><Ionicons name="cart-outline" size={80} color="#555" /><Text style={styles.screenTitle}>Корзина пуста</Text></View>);
+  }
+
+  const renderItem = ({ item }) => (
+    <View style={styles.cartItem}>
+      <SmartImage source={item.image} fallback={item.fallback} size={60} />
+      <View style={styles.cartItemInfo}>
+        <Text style={styles.cartItemName}>{item.name}</Text>
+        <Text style={styles.cartItemArticle}>Арт: {item.article}</Text>
+        <View style={styles.quantityRow}><Text style={styles.quantityLabel}>Кол-во:</Text><Text style={styles.quantityValue}>{item.quantity} шт.</Text></View>
+      </View>
+      <View style={styles.cartItemAction}>
+        <Text style={styles.cartItemPrice}>{(item.price * item.quantity).toLocaleString('ru-RU')} ₽</Text>
+        <TouchableOpacity style={styles.removeButton} onPress={() => { onRemove(item.id); onShowToast('Товар удалён из корзины', 'info'); }}><Ionicons name="close-circle" size={22} color="#FF4444" /></TouchableOpacity>
+      </View>
+    </View>
+  );
+
+  return (
+    <View style={{ flex: 1 }}>
+      <View style={styles.cartHeader}>
+        <Text style={styles.cartTitle}>Корзина</Text>
+        <TouchableOpacity onPress={() => { Alert.alert('Очистить корзину?', 'Все товары будут удалены', [{ text: 'Отмена', style: 'cancel' }, { text: 'Очистить', onPress: () => { onClear(); onShowToast('Корзина очищена', 'info'); } }]); }} style={styles.clearButton}>
+          <Ionicons name="trash-outline" size={16} color="#FF6B00" /><Text style={styles.clearText}>Очистить</Text>
+        </TouchableOpacity>
+      </View>
+      <FlatList data={cart} renderItem={renderItem} keyExtractor={(item) => item.id.toString()} contentContainerStyle={styles.cartList} showsVerticalScrollIndicator={false} />
+      <View style={styles.totalBlock}>
+        <View style={styles.totalRow}><Text style={styles.totalLabel}>Позиций:</Text><Text style={styles.totalValue}>{totalItems} шт.</Text></View>
+        <View style={styles.totalRow}><Text style={styles.totalLabel}>Итого:</Text><Text style={styles.totalSum}>{total.toLocaleString('ru-RU')} ₽</Text></View>
+        <TouchableOpacity style={styles.checkoutButton} onPress={onCheckout}><Text style={styles.checkoutButtonText}>Оформить заказ</Text></TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
+function ProfileScreen({ orders, onCancelOrder, onDeleteOrder, cars, onAddCar, onRemoveCar, onEditCar, userName, setUserName, userPhone, setUserPhone, onViewOrder, onShowToast, onRequestPart }) {
+  const handleRemoveCar = (car) => {
+    Alert.alert('Удалить автомобиль?', `${car.name} будет удален из гаража.`, [
+      { text: 'Отмена', style: 'cancel' },
+      { text: 'Удалить', style: 'destructive', onPress: () => { onRemoveCar(car.id); onShowToast('Автомобиль удалён', 'info'); } },
+    ]);
+  };
+
+  return (
+    <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
+      <View style={styles.profileHeader}>
+        <View style={styles.profileAvatar}><Ionicons name="person" size={40} color="#FFF" /></View>
+        <Text style={styles.profileName}>{userName ? `Привет, ${userName}!` : 'Добро пожаловать!'}</Text>
+      </View>
+
+      <View style={styles.profileSection}>
+        <Text style={styles.profileSectionTitle}>👤 Мои контактные данные</Text>
+        <View style={styles.profileCard}>
+          <Text style={styles.inputLabel}>Имя (для заказа)</Text>
+          <TextInput style={styles.profileInput} placeholder="Иван Иванов" value={userName} onChangeText={setUserName} />
+          <Text style={styles.inputLabel}>Телефон (для заказа)</Text>
+          <TextInput style={styles.profileInput} placeholder="+7 (999) 123-45-67" value={userPhone} onChangeText={setUserPhone} keyboardType="phone-pad" />
+          <Text style={styles.hintText}>Эти данные будут автоматически подставляться при оформлении заказа.</Text>
+        </View>
+      </View>
+
+      <View style={styles.profileSection}>
+        <View style={styles.profileSectionHeader}>
+          <Text style={styles.profileSectionTitle}>🚗 Мой гараж</Text>
+          <TouchableOpacity style={styles.addCarButton} onPress={onAddCar}>
+            <Ionicons name="add-circle" size={22} color="#FF6B00" /><Text style={styles.addCarButtonText}>Добавить</Text>
+          </TouchableOpacity>
+        </View>
+        {cars.length === 0 ? (
+          <View style={styles.emptyGarage}><Ionicons name="car-outline" size={48} color="#555" /><Text style={styles.emptyGarageText}>Гараж пуст</Text></View>
+        ) : (
+          cars.map((car) => (
+            <View key={car.id} style={styles.carCard}>
+              <View style={styles.carIconWrapper}><Ionicons name="car-sport" size={28} color="#FF6B00" /></View>
+              <View style={styles.carInfo}><Text style={styles.carName}>{car.name}</Text><Text style={styles.carYear}>{car.year}</Text></View>
+              <View style={styles.carActions}>
+                <TouchableOpacity style={styles.carEditButton} onPress={() => onEditCar(car)}><Ionicons name="pencil" size={18} color="#FF6B00" /></TouchableOpacity>
+                <TouchableOpacity style={styles.carDeleteButton} onPress={() => handleRemoveCar(car)}><Ionicons name="trash-outline" size={20} color="#FF4444" /></TouchableOpacity>
+              </View>
+            </View>
+          ))
+        )}
+      </View>
+
+      <View style={styles.profileSection}>
+        <TouchableOpacity style={styles.requestCard} onPress={onRequestPart}>
+          <View style={styles.requestIconWrapper}><Ionicons name="help-circle" size={32} color="#FF6B00" /></View>
+          <View style={styles.requestInfo}>
+            <Text style={styles.requestTitle}>📝 Запросить запчасть</Text>
+            <Text style={styles.requestText}>Не нашли нужную деталь? Оставьте запрос, и мы постараемся её найти!</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={24} color="#888" />
+        </TouchableOpacity>
+      </View>
+
+      <View style={styles.profileSection}>
+        <Text style={styles.profileSectionTitle}>📦 История заказов</Text>
+        {orders.length === 0 ? (
+          <View style={styles.emptyOrders}><Ionicons name="receipt-outline" size={40} color="#555" /><Text style={styles.emptyOrdersText}>У вас пока нет заказов</Text></View>
+        ) : (
+          orders.map((order) => {
+            const isCancelled = order.status === 'Отменен';
+            return (
+              <TouchableOpacity key={order.id} style={[styles.orderCard, isCancelled && styles.orderCardCancelled]} onPress={() => onViewOrder(order)}>
+                <View style={styles.orderHeader}>
+                  <Text style={[styles.orderNumber, isCancelled && styles.orderTextCancelled]}>Заказ #{order.id}</Text>
+                  <Text style={[styles.orderStatus, isCancelled && styles.orderStatusCancelled]}>{order.status}</Text>
+                </View>
+                <Text style={[styles.orderDate, isCancelled && styles.orderTextCancelled]}>{order.date}</Text>
+                <Text style={[styles.orderItems, isCancelled && styles.orderTextCancelled]}>{order.itemsCount} поз. • {order.total.toLocaleString('ru-RU')} ₽</Text>
+                {order.transportCompany && <Text style={[styles.orderTC, isCancelled && styles.orderTextCancelled]}>🚚 {order.transportCompany}</Text>}
+                <Ionicons name="chevron-forward" size={20} color="#888" style={{ marginTop: 8 }} />
+              </TouchableOpacity>
+            );
+          })
+        )}
+      </View>
+    </ScrollView>
+  );
+}
+
+function TabButton({ label, iconName, isActive, onPress, badge }) {
+  return (
+    <TouchableOpacity style={styles.tabButton} onPress={onPress} activeOpacity={0.7}>
+      <View style={styles.tabIconWrapper}>
+        <Ionicons name={iconName} size={26} color={isActive ? '#FF6B00' : '#FFFFFF'} />
+        {badge > 0 && <View style={styles.badge}><Text style={styles.badgeText}>{badge}</Text></View>}
+      </View>
+      <Text style={[styles.tabLabel, isActive && styles.tabLabelActive]}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState('home');
+  const [selectedCategory, setSelectedCategory] = useState(null);
+  const [cart, setCart] = useState(null);
+  const [orders, setOrders] = useState(null);
+  const [cars, setCars] = useState(null);
+  const [userName, setUserName] = useState(null);
+  const [userPhone, setUserPhone] = useState(null);
+
+  const [searchQuery, setSearchQuery] = useState('');
+  const [highlightProductId, setHighlightProductId] = useState(null);
+  const [selectedProduct, setSelectedProduct] = useState(null);
+  const [selectedOrder, setSelectedOrder] = useState(null);
+
+  const [showAddCarModal, setShowAddCarModal] = useState(false);
+  const [newCarName, setNewCarName] = useState('');
+  const [showEditCarModal, setShowEditCarModal] = useState(false);
+  const [editingCar, setEditingCar] = useState(null);
+  const [editCarName, setEditCarName] = useState('');
+  const [editCarYear, setEditCarYear] = useState('');
+  const [editCarVin, setEditCarVin] = useState('');
+  
+  const [showRequestModal, setShowRequestModal] = useState(false);
+
+  const [toast, setToast] = useState({ visible: false, message: '', type: 'info' });
+  const showToast = (message, type = 'info') => setToast({ visible: true, message, type });
+
+  useEffect(() => {
+    const loadData = async () => {
+      const savedCart = await storage.loadCart();
+      const savedOrders = await storage.loadOrders();
+      const savedCars = await storage.loadCars();
+      const savedProfile = await storage.loadProfile();
+      setCart(savedCart !== null ? savedCart : []);
+      setOrders(savedOrders !== null ? savedOrders : []);
+      setCars(savedCars !== null ? savedCars : [{ id: 1, name: 'Tank 300', year: '2023 • 2.0T • 4WD', vin: 'LGWFF6A59PJ******' }]);
+      setUserName(savedProfile?.name || '');
+      setUserPhone(savedProfile?.phone || '');
+    };
+    loadData();
+  }, []);
+
+  useEffect(() => { if (cart !== null) storage.saveCart(cart); }, [cart]);
+  useEffect(() => { if (orders !== null) storage.saveOrders(orders); }, [orders]);
+  useEffect(() => { if (cars !== null) storage.saveCars(cars); }, [cars]);
+  useEffect(() => { if (userName !== null && userPhone !== null) storage.saveProfile({ name: userName, phone: userPhone }); }, [userName, userPhone]);
+
+  const handleCategoryPress = (categoryName, productId = null) => { setSelectedCategory(categoryName); setHighlightProductId(productId); setActiveTab('catalog'); setSearchQuery(''); };
+  const handleBackToHome = () => { setSelectedCategory(null); setHighlightProductId(null); setActiveTab('home'); };
+  const handleOpenAddCar = () => { setNewCarName(''); setShowAddCarModal(true); };
+  const handleCloseAddCar = () => { setShowAddCarModal(false); setNewCarName(''); };
+  const handleConfirmAddCar = () => {
+    if (newCarName.trim().length < 2) { showToast('Введите марку и модель', 'error'); return; }
+    setCars((prev) => [...prev, { id: Date.now(), name: newCarName.trim(), year: 'Год не указан', vin: '' }]);
+    setShowAddCarModal(false);
+    showToast('Автомобиль добавлен в гараж', 'success');
+  };
+  const handleOpenEditCar = (car) => { setEditingCar(car); setEditCarName(car.name); setEditCarYear(car.year); setEditCarVin(car.vin || ''); setShowEditCarModal(true); };
+  const handleCloseEditCar = () => { setShowEditCarModal(false); setEditingCar(null); };
+  const handleConfirmEditCar = () => {
+    if (editCarName.trim().length < 2) { showToast('Введите марку и модель', 'error'); return; }
+    setCars((prev) => prev.map((c) => c.id === editingCar.id ? { ...editingCar, name: editCarName.trim(), year: editCarYear.trim() || 'Год не указан', vin: editCarVin.trim() } : c));
+    setShowEditCarModal(false);
+    showToast('Данные автомобиля обновлены', 'success');
+  };
+  const handleRemoveCar = (carId) => setCars((prev) => prev.filter((c) => c.id !== carId));
+  const handleAddToCart = (product) => setCart((prev) => {
+    const existing = prev.find((item) => item.id === product.id);
+    return existing ? prev.map((item) => item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item) : [...prev, { ...product, quantity: 1 }];
+  });
+  const handleRemoveFromCart = (productId) => setCart((prev) => {
+    const item = prev.find((i) => i.id === productId);
+    return item && item.quantity > 1 ? prev.map((i) => i.id === productId ? { ...i, quantity: i.quantity - 1 } : i) : prev.filter((i) => i.id !== productId);
+  });
+  const handleRemoveItem = (productId) => setCart((prev) => prev.filter((item) => item.id !== productId));
+  const handleClearCart = () => setCart([]);
+  const handleCheckout = () => { if (cart.length === 0) { showToast('Добавьте товары в корзину', 'error'); return; } setActiveTab('checkout'); };
+  
+  const handleSubmitOrder = async (orderData) => {
+    const orderId = genOrderId(orders);
+    const itemsText = orderData.items.map(i => `${i.name} (${i.article}) x${i.quantity}`).join('; ');
+    
+    const newOrder = { 
+      id: orderId, 
+      date: new Date().toLocaleDateString('ru-RU'), 
+      itemsCount: orderData.totalItems, 
+      total: orderData.total, 
+      status: 'В обработке', 
+      customer: orderData.name, 
+      phone: orderData.phone, 
+      address: orderData.address, 
+      transportCompany: orderData.transportCompany, 
+      items: orderData.items || [] 
+    };
+    
+    setOrders((prev) => [newOrder, ...prev]);
+    setCart([]);
+    setActiveTab('success');
+
+    try {
+      await fetch(SCRIPT_URL, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({
+          type: 'order',
+          orderId: String(orderId),
+          name: orderData.name,
+          phone: orderData.phone,
+          address: orderData.address,
+          tc: orderData.transportCompany,
+          items: itemsText,
+          total: orderData.total
+        }),
+      });
+      console.log('✅ Заказ отправлен в таблицу');
+    } catch (error) {
+      console.error('❌ Ошибка отправки заказа:', error);
+    }
+  };
+
+  // ОТМЕНА: меняет статус в таблице на "Отменён", но оставляет в истории приложения
+  const handleCancelOrder = async (orderId) => {
+    setOrders((prev) => prev.map((order) => order.id === orderId ? { ...order, status: 'Отменен' } : order));
+    
+    try {
+      await fetch(SCRIPT_URL, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({
+          type: 'cancel_order',
+          orderId: String(orderId)
+        }),
+      });
+      console.log('✅ Сигнал отмены отправлен');
+    } catch (error) {
+      console.error('❌ Ошибка отмены:', error);
+    }
+  };
+
+  // УДАЛЕНИЕ: убирает из истории приложения И помечает как "Отменён" в таблице
+  const handleDeleteOrder = async (orderId) => {
+    setOrders((prev) => prev.filter((order) => order.id !== orderId));
+    
+    try {
+      await fetch(SCRIPT_URL, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({
+          type: 'delete_order',
+          orderId: String(orderId)
+        }),
+      });
+      console.log('✅ Сигнал удаления отправлен');
+    } catch (error) {
+      console.error('❌ Ошибка удаления:', error);
+    }
+  };
+
+  const handleGoHome = () => setActiveTab('home');
+  
+  const handleRequestPart = async (requestData) => {
+    showToast('Отправка запроса...', 'info');
+    
+    try {
+      await fetch(SCRIPT_URL, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({
+          type: 'request',
+          car: requestData.car,
+          part: requestData.part,
+          comment: requestData.comment,
+          phone: requestData.phone
+        }),
+      });
+      showToast('Запрос успешно отправлен! Мы свяжемся с вами.', 'success');
+    } catch (error) {
+      console.error('❌ Ошибка:', error);
+      showToast('Ошибка сети. Проверьте интернет.', 'error');
+    }
+  };
+
+  const totalCartItems = useMemo(() => cart ? cart.reduce((sum, item) => sum + item.quantity, 0) : 0, [cart]);
+
+  if (cart === null || cars === null) {
+    return (<View style={styles.loadingContainer}><Text style={styles.loadingText}>Загрузка данных...</Text></View>);
+  }
+
+  const renderScreen = () => {
+    switch (activeTab) {
+      case 'home': return <HomeScreen onCategoryPress={handleCategoryPress} onViewProduct={setSelectedProduct} searchQuery={searchQuery} onSearchChange={setSearchQuery} garageCars={cars} />;
+      case 'catalog': return <CatalogScreen categoryName={selectedCategory} onBack={handleBackToHome} cart={cart} onAddToCart={handleAddToCart} onRemoveFromCart={handleRemoveFromCart} highlightProductId={highlightProductId} garageCars={cars} onViewProduct={setSelectedProduct} onShowToast={showToast} />;
+      case 'cart': return <CartScreen cart={cart} onRemove={handleRemoveItem} onClear={handleClearCart} onCheckout={handleCheckout} onShowToast={showToast} />;
+      case 'checkout': return <CheckoutScreen cart={cart} onBack={() => setActiveTab('cart')} onSubmitOrder={handleSubmitOrder} defaultName={userName} defaultPhone={userPhone} onShowToast={showToast} />;
+      case 'success': return <OrderSuccessScreen onGoHome={handleGoHome} />;
+      case 'profile': return <ProfileScreen orders={orders} onCancelOrder={handleCancelOrder} onDeleteOrder={handleDeleteOrder} cars={cars} onAddCar={handleOpenAddCar} onRemoveCar={handleRemoveCar} onEditCar={handleOpenEditCar} userName={userName} setUserName={setUserName} userPhone={userPhone} setUserPhone={setUserPhone} onViewOrder={setSelectedOrder} onShowToast={showToast} onRequestPart={() => setShowRequestModal(true)} />;
+      default: return <HomeScreen onCategoryPress={handleCategoryPress} onViewProduct={setSelectedProduct} searchQuery={searchQuery} onSearchChange={setSearchQuery} garageCars={cars} />;
+    }
+  };
+
+  const showTabBar = !['checkout', 'success'].includes(activeTab);
+  const firstCarName = cars.length > 0 ? cars[0].name : '';
+
+  return (
+    <ImageBackground source={require('./assets/tank.jpg')} style={styles.background} resizeMode="cover">
+      <View style={styles.overlay} />
+      <SafeAreaView style={styles.container}>
+        <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
+        <View style={styles.content}>{renderScreen()}</View>
+        {showTabBar && (
+          <View style={styles.tabBar}>
+            <TabButton label="Главная" iconName="home" isActive={activeTab === 'home'} onPress={() => { setSelectedCategory(null); setHighlightProductId(null); setSearchQuery(''); setActiveTab('home'); }} />
+            <TabButton label="Корзина" iconName="cart" isActive={activeTab === 'cart'} onPress={() => setActiveTab('cart')} badge={totalCartItems} />
+            <TabButton label="Профиль" iconName="person" isActive={activeTab === 'profile'} onPress={() => setActiveTab('profile')} />
+          </View>
+        )}
+      </SafeAreaView>
+
+      <ToastNotification message={toast.message} type={toast.type} visible={toast.visible} onHide={() => setToast({ ...toast, visible: false })} />
+
+      <RequestPartModal 
+        visible={showRequestModal} 
+        onClose={() => setShowRequestModal(false)} 
+        onSubmit={handleRequestPart}
+        defaultCar={firstCarName}
+        defaultPhone={userPhone}
+      />
+
+      <ProductDetailModal product={selectedProduct} onClose={() => setSelectedProduct(null)} onAddToCart={handleAddToCart} onShowToast={showToast} />
+      <OrderDetailModal order={selectedOrder} onClose={() => setSelectedOrder(null)} onCancelOrder={handleCancelOrder} onDeleteOrder={handleDeleteOrder} onShowToast={showToast} />
+
+      <Modal visible={showAddCarModal} transparent animationType="fade" onRequestClose={handleCloseAddCar}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Добавить автомобиль</Text>
+            <TextInput style={styles.modalInput} placeholder="Например: Toyota Camry" value={newCarName} onChangeText={setNewCarName} autoFocus />
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={styles.modalButtonCancel} onPress={handleCloseAddCar}><Text style={styles.modalButtonCancelText}>Отмена</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.modalButtonConfirm} onPress={handleConfirmAddCar}><Text style={styles.modalButtonConfirmText}>Добавить</Text></TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={showEditCarModal} transparent animationType="fade" onRequestClose={handleCloseEditCar}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Редактировать автомобиль</Text>
+            <Text style={styles.modalLabel}>Марка и модель *</Text>
+            <TextInput style={styles.modalInput} value={editCarName} onChangeText={setEditCarName} autoFocus />
+            <Text style={styles.modalLabel}>Год и характеристики</Text>
+            <TextInput style={styles.modalInput} value={editCarYear} onChangeText={setEditCarYear} />
+            <Text style={styles.modalLabel}>VIN номер</Text>
+            <TextInput style={styles.modalInput} value={editCarVin} onChangeText={setEditCarVin} />
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={styles.modalButtonCancel} onPress={handleCloseEditCar}><Text style={styles.modalButtonCancelText}>Отмена</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.modalButtonConfirm} onPress={handleConfirmEditCar}><Text style={styles.modalButtonConfirmText}>Сохранить</Text></TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+    </ImageBackground>
+  );
+}
+
+const styles = StyleSheet.create({
+  background: { flex: 1, width: '100%', height: '100%' },
+  overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(13, 13, 13, 0.55)' },
+  container: { flex: 1 },
+  content: { flex: 1 },
+  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0D0D0D' },
+  loadingText: { color: '#FFF', fontSize: 18 },
+  toastContainer: { position: 'absolute', bottom: 100, left: 20, right: 20, backgroundColor: 'rgba(30, 30, 30, 0.95)', borderRadius: 12, padding: 16, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.1)', shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 8 },
+  toastContent: { flexDirection: 'row', alignItems: 'center' },
+  toastText: { color: '#FFF', fontSize: 15, fontWeight: '600', marginLeft: 12, flex: 1 },
+  header: { alignItems: 'center', paddingVertical: 20 },
+  logo: { fontSize: 36, fontWeight: '900', color: '#FF6B00', letterSpacing: 3, textShadowColor: 'rgba(0,0,0,0.8)', textShadowOffset: { width: 0, height: 2 }, textShadowRadius: 4 },
+  emptyGarageBanner: { alignItems: 'center', padding: 20, marginHorizontal: 16, marginBottom: 16, backgroundColor: 'rgba(255, 107, 0, 0.1)', borderRadius: 12, borderWidth: 1, borderColor: 'rgba(255, 107, 0, 0.3)' },
+  emptyGarageTitle: { fontSize: 18, fontWeight: 'bold', color: '#FFF', marginTop: 12, marginBottom: 6, textAlign: 'center' },
+  emptyGarageText: { fontSize: 13, color: '#CCC', textAlign: 'center' },
+  garageStrip: { paddingHorizontal: 16, marginBottom: 12, maxHeight: 40 },
+  garageChip: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255, 107, 0, 0.15)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, marginRight: 8, borderWidth: 1, borderColor: 'rgba(255, 107, 0, 0.4)' },
+  garageChipText: { color: '#FFF', fontSize: 12, fontWeight: '600', marginLeft: 6 },
+  searchWrapper: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.1)', borderRadius: 12, paddingHorizontal: 14, marginHorizontal: 16, marginBottom: 20, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.2)' },
+  searchIcon: { fontSize: 18, marginRight: 10 },
+  searchInput: { flex: 1, color: '#FFF', fontSize: 15, paddingVertical: 12 },
+  searchResultsWrapper: { paddingHorizontal: 16, marginBottom: 20 },
+  searchResultsTitle: { fontSize: 16, fontWeight: 'bold', color: '#FF6B00', marginBottom: 12 },
+  searchResultCard: { flexDirection: 'row', backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 12, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: 'rgba(255, 107, 0, 0.4)', alignItems: 'center' },
+  searchResultImageWrapper: { width: 60, height: 60, backgroundColor: 'rgba(255, 255, 255, 0.05)', borderRadius: 8, justifyContent: 'center', alignItems: 'center', marginRight: 12 },
+  searchResultInfo: { flex: 1 },
+  searchResultName: { fontSize: 14, fontWeight: 'bold', color: '#FFF', marginBottom: 3 },
+  searchResultCar: { fontSize: 11, color: '#CCC', marginBottom: 3 },
+  searchResultArticle: { fontSize: 10, color: '#FF6B00', fontWeight: '600' },
+  searchResultPrice: { fontSize: 15, fontWeight: 'bold', color: '#FFF' },
+  gridWrapper: { paddingHorizontal: 16 },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' },
+  card: { width: '48%', backgroundColor: 'rgba(255, 255, 255, 0.05)', borderRadius: 12, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.15)', alignItems: 'center' },
+  cardImage: { width: 70, height: 70, marginBottom: 8 },
+  cardName: { fontSize: 14, fontWeight: 'bold', color: '#FFF', marginBottom: 4, textAlign: 'center' },
+  cardCount: { fontSize: 11, color: '#DDD' },
+  catalogHeader: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 16 },
+  backButton: { flexDirection: 'row', alignItems: 'center', marginRight: 12 },
+  backText: { color: '#FFF', fontSize: 16, fontWeight: '600', marginLeft: 6 },
+  catalogTitle: { fontSize: 20, fontWeight: 'bold', color: '#FFF', flex: 1 },
+  productsList: { paddingHorizontal: 16, paddingBottom: 40 },
+  productCard: { flexDirection: 'row', backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 12, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.1)', minHeight: 100 },
+  productCardHighlighted: { borderColor: '#FF6B00', borderWidth: 2, backgroundColor: 'rgba(255, 107, 0, 0.1)' },
+  productImageWrapper: { width: 80, height: 80, backgroundColor: 'rgba(255, 255, 255, 0.05)', borderRadius: 10, justifyContent: 'center', alignItems: 'center', marginRight: 12, flexShrink: 0 },
+  productRightSide: { flex: 1, justifyContent: 'space-between', paddingVertical: 2 },
+  productInfo: { flex: 1, marginBottom: 8 },
+  productName: { fontSize: 14, fontWeight: 'bold', color: '#FFF', marginBottom: 3 },
+  productCar: { fontSize: 11, color: '#CCC', marginBottom: 5 },
+  articleBadge: { backgroundColor: 'rgba(255, 107, 0, 0.2)', paddingHorizontal: 6, paddingVertical: 3, borderRadius: 4, alignSelf: 'flex-start' },
+  articleText: { fontSize: 10, color: '#FF6B00', fontWeight: '600' },
+  productAction: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  productPrice: { fontSize: 16, fontWeight: 'bold', color: '#FFF' },
+  addButton: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FF6B00', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6 },
+  addButtonText: { color: '#FFF', fontWeight: 'bold', fontSize: 12, marginLeft: 4 },
+  counter: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255, 107, 0, 0.2)', borderRadius: 6, borderWidth: 1, borderColor: 'rgba(255, 107, 0, 0.4)' },
+  counterButton: { width: 28, height: 28, alignItems: 'center', justifyContent: 'center' },
+  counterValue: { color: '#FFF', fontSize: 14, fontWeight: 'bold', paddingHorizontal: 8, minWidth: 24, textAlign: 'center' },
+  emptyState: { alignItems: 'center', justifyContent: 'center', paddingVertical: 80, paddingHorizontal: 20 },
+  emptyText: { fontSize: 18, fontWeight: '600', color: '#888', marginTop: 16, textAlign: 'center' },
+  checkoutWrapper: { paddingHorizontal: 16 },
+  checkoutSection: { backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 12, padding: 16, marginBottom: 16, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.1)' },
+  checkoutSectionTitle: { fontSize: 16, fontWeight: 'bold', color: '#FF6B00', marginBottom: 12 },
+  checkoutItem: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: 'rgba(255, 255, 255, 0.1)' },
+  checkoutItemName: { fontSize: 14, color: '#FFF', flex: 1 },
+  checkoutItemDetails: { fontSize: 13, color: '#CCC' },
+  checkoutTotalRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: 'rgba(255, 107, 0, 0.4)' },
+  checkoutTotalLabel: { fontSize: 16, color: '#FFF', fontWeight: '600' },
+  checkoutTotalSum: { fontSize: 20, color: '#FF6B00', fontWeight: 'bold' },
+  inputLabel: { fontSize: 13, color: '#CCC', marginBottom: 6, marginTop: 10 },
+  checkoutInput: { backgroundColor: 'rgba(255, 255, 255, 0.05)', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 12, color: '#FFF', fontSize: 14, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.15)' },
+  inputError: { borderColor: '#FF4444' },
+  errorText: { color: '#FF4444', fontSize: 11, marginTop: 4 },
+  tcList: { marginTop: 4 },
+  tcOption: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.05)', borderRadius: 8, padding: 12, marginBottom: 8, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.1)' },
+  tcOptionSelected: { backgroundColor: 'rgba(255, 107, 0, 0.15)', borderColor: '#FF6B00' },
+  tcRadio: { width: 20, height: 20, borderRadius: 10, borderWidth: 2, borderColor: '#FF6B00', alignItems: 'center', justifyContent: 'center', marginRight: 12 },
+  tcRadioDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#FF6B00' },
+  tcInfo: { flex: 1 },
+  tcName: { fontSize: 14, color: '#FFF', fontWeight: '600' },
+  tcNameSelected: { color: '#FF6B00' },
+  tcCity: { fontSize: 11, color: '#888', marginTop: 2 },
+  submitButton: { backgroundColor: '#FF6B00', borderRadius: 10, paddingVertical: 16, alignItems: 'center', marginTop: 8, marginBottom: 20 },
+  submitButtonText: { color: '#FFF', fontSize: 16, fontWeight: 'bold' },
+  successContainer: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 30 },
+  successTitle: { fontSize: 26, fontWeight: 'bold', color: '#FFF', marginTop: 20, marginBottom: 10, textAlign: 'center' },
+  successText: { fontSize: 16, color: '#FF6B00', fontWeight: '600', marginBottom: 10, textAlign: 'center' },
+  successButton: { backgroundColor: '#FF6B00', borderRadius: 10, paddingHorizontal: 30, paddingVertical: 14, marginTop: 20 },
+  successButtonText: { color: '#FFF', fontSize: 16, fontWeight: 'bold' },
+  screenContainer: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  screenTitle: { fontSize: 20, color: '#888', marginTop: 16 },
+  cartHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 16, paddingRight: 12 },
+  cartTitle: { fontSize: 24, fontWeight: 'bold', color: '#FFF' },
+  clearButton: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255, 107, 0, 0.15)', paddingHorizontal: 10, paddingVertical: 7, borderRadius: 8, borderWidth: 1, borderColor: 'rgba(255, 107, 0, 0.4)' },
+  clearText: { color: '#FF6B00', fontWeight: '600', fontSize: 12, marginLeft: 4 },
+  cartList: { paddingHorizontal: 16, paddingBottom: 20 },
+  cartItem: { flexDirection: 'row', backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 12, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.1)', alignItems: 'center' },
+  cartItemInfo: { flex: 1, paddingRight: 10 },
+  cartItemName: { fontSize: 14, fontWeight: 'bold', color: '#FFF', marginBottom: 3 },
+  cartItemArticle: { fontSize: 11, color: '#FF6B00', marginBottom: 4 },
+  quantityRow: { flexDirection: 'row', alignItems: 'center' },
+  quantityLabel: { fontSize: 11, color: '#AAA', marginRight: 4 },
+  quantityValue: { fontSize: 12, color: '#FFF', fontWeight: '600' },
+  cartItemAction: { alignItems: 'flex-end', justifyContent: 'space-between' },
+  cartItemPrice: { fontSize: 15, fontWeight: 'bold', color: '#FFF', marginBottom: 4 },
+  removeButton: { padding: 2 },
+  totalBlock: { marginHorizontal: 16, marginTop: 16, backgroundColor: 'rgba(255, 107, 0, 0.15)', borderRadius: 12, padding: 16, borderWidth: 1, borderColor: 'rgba(255, 107, 0, 0.3)' },
+  totalRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
+  totalLabel: { fontSize: 15, color: '#FFF' },
+  totalValue: { fontSize: 15, color: '#FFF', fontWeight: '600' },
+  totalSum: { fontSize: 22, color: '#FF6B00', fontWeight: 'bold' },
+  checkoutButton: { backgroundColor: '#FF6B00', borderRadius: 10, paddingVertical: 14, alignItems: 'center', marginTop: 12 },
+  checkoutButtonText: { color: '#FFF', fontSize: 16, fontWeight: 'bold' },
+  profileHeader: { alignItems: 'center', paddingVertical: 24, paddingHorizontal: 16 },
+  profileAvatar: { width: 80, height: 80, borderRadius: 40, backgroundColor: '#FF6B00', alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
+  profileName: { fontSize: 20, fontWeight: 'bold', color: '#FFF', marginBottom: 4 },
+  profileSection: { paddingHorizontal: 16, marginBottom: 20 },
+  profileSectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  profileSectionTitle: { fontSize: 18, fontWeight: 'bold', color: '#FFF' },
+  profileCard: { backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 12, padding: 16, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.1)' },
+  profileInput: { backgroundColor: 'rgba(255, 255, 255, 0.05)', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 12, color: '#FFF', fontSize: 14, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.15)', marginBottom: 12 },
+  hintText: { fontSize: 11, color: '#888', fontStyle: 'italic', marginTop: -6 },
+  addCarButton: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255, 107, 0, 0.15)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: 'rgba(255, 107, 0, 0.4)' },
+  addCarButtonText: { color: '#FF6B00', fontWeight: '600', fontSize: 13, marginLeft: 4 },
+  emptyGarage: { alignItems: 'center', paddingVertical: 24, backgroundColor: 'rgba(255, 255, 255, 0.05)', borderRadius: 12, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.1)', borderStyle: 'dashed' },
+  carCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 12, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: 'rgba(255, 107, 0, 0.3)' },
+  carIconWrapper: { width: 50, height: 50, borderRadius: 25, backgroundColor: 'rgba(255, 107, 0, 0.15)', alignItems: 'center', justifyContent: 'center', marginRight: 12 },
+  carInfo: { flex: 1 },
+  carName: { fontSize: 16, fontWeight: 'bold', color: '#FFF', marginBottom: 2 },
+  carYear: { fontSize: 12, color: '#CCC' },
+  carActions: { flexDirection: 'row', alignItems: 'center' },
+  carEditButton: { padding: 8, backgroundColor: 'rgba(255, 107, 0, 0.15)', borderRadius: 8, marginRight: 8 },
+  carDeleteButton: { padding: 8, backgroundColor: 'rgba(255, 68, 68, 0.15)', borderRadius: 8 },
+  emptyOrders: { alignItems: 'center', paddingVertical: 30, backgroundColor: 'rgba(255, 255, 255, 0.05)', borderRadius: 12 },
+  emptyOrdersText: { color: '#888', fontSize: 14, marginTop: 10 },
+  orderCard: { backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 10, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.1)' },
+  orderCardCancelled: { opacity: 0.6, backgroundColor: 'rgba(100, 100, 100, 0.1)' },
+  orderHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
+  orderNumber: { fontSize: 14, fontWeight: 'bold', color: '#FFF' },
+  orderStatus: { fontSize: 12, color: '#FF6B00', fontWeight: '600' },
+  orderStatusCancelled: { color: '#FF4444' },
+  orderDate: { fontSize: 12, color: '#AAA', marginBottom: 4 },
+  orderItems: { fontSize: 13, color: '#CCC' },
+  orderTC: { fontSize: 12, color: '#FF6B00', marginTop: 4, fontWeight: '600' },
+  orderTextCancelled: { color: '#888' },
+  tabBar: { flexDirection: 'row', backgroundColor: 'rgba(0, 0, 0, 0.55)', paddingBottom: 25, paddingTop: 12, borderTopWidth: 1, borderTopColor: 'rgba(255, 255, 255, 0.1)' },
+  tabButton: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  tabIconWrapper: { position: 'relative', marginBottom: 4 },
+  badge: { position: 'absolute', top: -6, right: -10, backgroundColor: '#FF4444', borderRadius: 10, minWidth: 18, height: 18, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
+  badgeText: { color: '#FFF', fontSize: 10, fontWeight: 'bold' },
+  tabLabel: { fontSize: 12, color: '#FFFFFF', fontWeight: '500' },
+  tabLabelActive: { color: '#FF6B00', fontWeight: 'bold' },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.7)', justifyContent: 'center', alignItems: 'center', padding: 20 },
+  modalContent: { backgroundColor: '#1a1a1a', borderRadius: 16, padding: 24, width: '100%', maxWidth: 400, borderWidth: 1, borderColor: 'rgba(255, 107, 0, 0.4)' },
+  modalTitle: { fontSize: 22, fontWeight: 'bold', color: '#FFF', marginBottom: 8, textAlign: 'center' },
+  modalSubtitle: { fontSize: 14, color: '#CCC', textAlign: 'center', marginBottom: 16, lineHeight: 20 },
+  modalLabel: { fontSize: 13, color: '#CCC', marginBottom: 6, marginTop: 10 },
+  modalInput: { backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 14, color: '#FFF', fontSize: 16, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.2)', marginBottom: 10 },
+  modalButtons: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 },
+  modalButtonCancel: { flex: 1, paddingVertical: 12, alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 10, marginRight: 8 },
+  modalButtonCancelText: { color: '#FFF', fontSize: 15, fontWeight: '600' },
+  modalButtonConfirm: { flex: 1, paddingVertical: 12, alignItems: 'center', backgroundColor: '#FF6B00', borderRadius: 10, marginLeft: 8 },
+  modalButtonConfirmText: { color: '#FFF', fontSize: 15, fontWeight: 'bold' },
+  closeButtonModal: { position: 'absolute', top: 15, right: 15, zIndex: 10 },
+  detailModalOverlay: { flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.85)', justifyContent: 'center', alignItems: 'center', padding: 20 },
+  detailModalContent: { backgroundColor: '#1a1a1a', borderRadius: 20, width: '100%', maxWidth: 400, maxHeight: '85%', borderWidth: 1, borderColor: 'rgba(255, 107, 0, 0.4)', overflow: 'hidden' },
+  closeButton: { position: 'absolute', top: 10, right: 10, zIndex: 10, padding: 5 },
+  detailImageContainer: { width: '100%', height: 250, backgroundColor: 'rgba(255,255,255,0.05)', alignItems: 'center', justifyContent: 'center' },
+  detailInfoContainer: { padding: 20 },
+  detailName: { fontSize: 20, fontWeight: 'bold', color: '#FFF', marginBottom: 8 },
+  detailCar: { fontSize: 14, color: '#FF6B00', fontWeight: '600', marginBottom: 10 },
+  detailArticleBadge: { backgroundColor: 'rgba(255, 255, 255, 0.1)', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, alignSelf: 'flex-start', marginBottom: 12 },
+  detailArticleText: { fontSize: 12, color: '#CCC', fontWeight: '600' },
+  detailPrice: { fontSize: 28, fontWeight: 'bold', color: '#FFF', marginBottom: 16 },
+  detailDescTitle: { fontSize: 16, fontWeight: 'bold', color: '#FFF', marginBottom: 6 },
+  detailDescText: { fontSize: 14, color: '#CCC', lineHeight: 20, marginBottom: 20 },
+  detailAddButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#FF6B00', paddingVertical: 16, margin: 20, marginTop: 0, borderRadius: 12 },
+  detailAddButtonText: { color: '#FFF', fontSize: 16, fontWeight: 'bold', marginLeft: 8 },
+  orderDetailHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
+  orderDetailNumber: { fontSize: 22, fontWeight: 'bold', color: '#FFF' },
+  orderDetailStatus: { fontSize: 14, color: '#FF6B00', fontWeight: '600' },
+  orderDetailDate: { fontSize: 13, color: '#AAA', marginBottom: 20 },
+  orderDetailSectionTitle: { fontSize: 16, fontWeight: 'bold', color: '#FF6B00', marginBottom: 12, marginTop: 8 },
+  orderDetailItem: { flexDirection: 'row', backgroundColor: 'rgba(255, 255, 255, 0.05)', borderRadius: 10, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.1)' },
+  orderDetailItemImage: { width: 50, height: 50, backgroundColor: 'rgba(255, 255, 255, 0.05)', borderRadius: 8, justifyContent: 'center', alignItems: 'center', marginRight: 12 },
+  orderDetailItemInfo: { flex: 1 },
+  orderDetailItemName: { fontSize: 14, fontWeight: 'bold', color: '#FFF', marginBottom: 3 },
+  orderDetailItemArticle: { fontSize: 11, color: '#FF6B00', marginBottom: 2 },
+  orderDetailItemCar: { fontSize: 11, color: '#CCC' },
+  orderDetailItemPrice: { alignItems: 'flex-end' },
+  orderDetailItemQuantity: { fontSize: 12, color: '#FFF', fontWeight: '600', marginBottom: 4 },
+  orderDetailItemTotal: { fontSize: 14, fontWeight: 'bold', color: '#FFF' },
+  orderDetailEmpty: { fontSize: 14, color: '#888', fontStyle: 'italic', marginBottom: 20 },
+  orderDetailTotal: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 16, borderTopWidth: 1, borderTopColor: 'rgba(255, 107, 0, 0.4)', marginTop: 8, marginBottom: 20 },
+  orderDetailTotalLabel: { fontSize: 18, color: '#FFF', fontWeight: '600' },
+  orderDetailTotalSum: { fontSize: 22, color: '#FF6B00', fontWeight: 'bold' },
+  orderDetailInfoBlock: { backgroundColor: 'rgba(255, 255, 255, 0.05)', borderRadius: 10, padding: 16, marginBottom: 20 },
+  orderDetailInfoLabel: { fontSize: 13, color: '#AAA', marginBottom: 4, marginTop: 8 },
+  orderDetailInfoText: { fontSize: 14, color: '#FFF', fontWeight: '500' },
+  orderCancelButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255, 68, 68, 0.15)', borderRadius: 10, paddingVertical: 12, marginBottom: 10, borderWidth: 1, borderColor: 'rgba(255, 68, 68, 0.4)' },
+  orderCancelButtonText: { color: '#FF4444', fontSize: 15, fontWeight: '600', marginLeft: 8 },
+  orderDeleteButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255, 255, 255, 0.05)', borderRadius: 10, paddingVertical: 12, marginBottom: 20, borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.1)' },
+  orderDeleteButtonText: { color: '#888', fontSize: 15, fontWeight: '600', marginLeft: 8 },
+  confirmOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0, 0, 0, 0.7)', justifyContent: 'center', alignItems: 'center', padding: 30, zIndex: 100 },
+  confirmBox: { backgroundColor: '#1a1a1a', borderRadius: 16, padding: 24, width: '100%', alignItems: 'center', borderWidth: 1, borderColor: 'rgba(255, 107, 0, 0.4)' },
+  confirmTitle: { fontSize: 20, fontWeight: 'bold', color: '#FFF', marginTop: 16, marginBottom: 8, textAlign: 'center' },
+  confirmText: { fontSize: 14, color: '#CCC', textAlign: 'center', marginBottom: 20 },
+  confirmButtons: { flexDirection: 'row', width: '100%', justifyContent: 'space-between' },
+  confirmCancelBtn: { flex: 1, paddingVertical: 12, alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 10, marginRight: 8 },
+  confirmCancelText: { color: '#FFF', fontSize: 15, fontWeight: '600' },
+  confirmOkBtn: { flex: 1, paddingVertical: 12, alignItems: 'center', backgroundColor: '#FF4444', borderRadius: 10, marginLeft: 8 },
+  confirmOkText: { color: '#FFF', fontSize: 15, fontWeight: 'bold' },
+  requestCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255, 107, 0, 0.1)', borderRadius: 12, padding: 16, borderWidth: 1, borderColor: 'rgba(255, 107, 0, 0.3)', marginBottom: 10 },
+  requestIconWrapper: { width: 50, height: 50, borderRadius: 25, backgroundColor: 'rgba(255, 107, 0, 0.2)', alignItems: 'center', justifyContent: 'center', marginRight: 12 },
+  requestInfo: { flex: 1 },
+  requestTitle: { fontSize: 16, fontWeight: 'bold', color: '#FFF', marginBottom: 4 },
+  requestText: { fontSize: 13, color: '#CCC', lineHeight: 18 },
+});

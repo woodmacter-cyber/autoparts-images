@@ -1,0 +1,8 @@
+export const transportCompanies = [
+  { id: 'cdek', name: 'СДЭК (склад в Китае)', city: 'Гуанчжоу' },
+  { id: '1kargo', name: '1kargo (карго)', city: 'Гуанчжоу → Якутск' },
+  { id: 'pochta', name: 'Почта России', city: 'Китай → Якутск' },
+  { id: 'delovye', name: 'Деловые Линии', city: 'Гуанчжоу → Якутск' },
+  { id: 'pek', name: 'ПЭК', city: 'Гуанчжоу → Якутск' },
+  { id: 'avia', name: 'Авиа-карго (быстрая)', city: 'Гуанчжоу → Якутск (5-10 дней)' },
+];

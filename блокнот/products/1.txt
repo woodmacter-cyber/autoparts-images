@@ -1,0 +1,59 @@
+// Локальные иконки как запасной вариант (fallback), если интернет пропадет или ссылка битая
+const fallbackImg = {
+  engine: require('../../assets/engine.png'),
+  suspension: require('../../assets/suspension.png'),
+  light: require('../../assets/light.png'),
+  seat: require('../../assets/seat.png'),
+  turbo: require('../../assets/turbo.png'),
+  wheel: require('../../assets/wheel.png'),
+  ecu: require('../../assets/ecu.png'),
+  body: require('../../assets/body.png'),
+};
+
+// Базовый путь к вашему репозиторию (без пробелов!)
+const BASE_URL = 'https://raw.githubusercontent.com/woodmacter-cyber/autoparts-images/main/';
+
+export const productsByCategory = {
+  'Подвеска': [
+    { id: 201, name: 'Внешний ШРУС в сборе', car: 'Tank 300 (Оригинал GWM)', article: '3401100XKZ01A', price: 12500, image: { uri: `${BASE_URL}shrus-tank300.webp` }, fallback: fallbackImg.suspension, compatibleCars: ['Tank 300', 'Haval H9'], keywords: ['tank300', 'tank', 'haval', 'h9', 'шрус'] },
+    { id: 202, name: 'Пыльник внешнего ШРУСа', car: 'Tank 300 (усиленный)', article: 'BOOT-T300-OUT', price: 1800, image: { uri: `${BASE_URL}pylnik.webp` }, fallback: fallbackImg.suspension, compatibleCars: ['Tank 300', 'Haval H9'], keywords: ['tank300', 'tank', 'haval', 'пыльник'] },
+    { id: 203, name: 'Стойка стабилизатора', car: 'Tank 300 (LYNX)', article: 'C7210L', price: 2400, image: { uri: `${BASE_URL}stabilizator.webp` }, fallback: fallbackImg.suspension, compatibleCars: ['Tank 300'], keywords: ['tank300', 'tank', 'стабилизатор'] },
+    { id: 204, name: 'Амортизатор передний', car: 'Toyota Land Cruiser 300', article: '48510-60B10', price: 8900, image: { uri: `${BASE_URL}amortizator.webp` }, fallback: fallbackImg.suspension, compatibleCars: ['Toyota Land Cruiser 300', 'Lexus LX 600'], keywords: ['toyota', 'lc300', 'амортизатор'] },
+    { id: 205, name: 'Тормозные колодки', car: 'Nissan Leaf', article: 'D1060-1KC0A', price: 3200, image: { uri: `${BASE_URL}kolodki.webp` }, fallback: fallbackImg.suspension, compatibleCars: ['Nissan Leaf'], keywords: ['nissan', 'leaf', 'колодки'] },
+    { id: 206, name: 'Сайлентблок рычага', car: 'Nissan Leaf (CTR)', article: '54581-1KC0A', price: 1400, image: { uri: `${BASE_URL}sajlentblok.webp` }, fallback: fallbackImg.suspension, compatibleCars: ['Nissan Leaf'], keywords: ['nissan', 'leaf', 'сайлентблок'] },
+  ],
+  'Двигатель': [
+    { id: 101, name: 'Масляный фильтр', car: 'Tank 300 2.0T', article: '1017100XKZ01A', price: 850, image: { uri: `${BASE_URL}maslo-filter.webp` }, fallback: fallbackImg.engine, compatibleCars: ['Tank 300', 'Haval H9', 'Haval F7'], keywords: ['tank300', 'tank', 'масло', 'фильтр'] },
+    { id: 102, name: 'Воздушный фильтр', car: 'Tank 300 2.0T', article: '1109100XKZ01A', price: 1200, image: { uri: `${BASE_URL}vozduh-filter.webp` }, fallback: fallbackImg.engine, compatibleCars: ['Tank 300', 'Haval H9'], keywords: ['tank300', 'tank', 'воздух', 'фильтр'] },
+    { id: 103, name: 'Свечи зажигания', car: 'Toyota LC 300', article: '90919-01253', price: 3200, image: { uri: `${BASE_URL}svechi.webp` }, fallback: fallbackImg.engine, compatibleCars: ['Toyota Land Cruiser 300', 'Lexus LX 600', 'Toyota Camry'], keywords: ['toyota', 'свечи'] },
+    { id: 104, name: 'Фильтр салона угольный', car: 'Nissan Leaf', article: '27277-1KC0A', price: 950, image: { uri: `${BASE_URL}salon-filter.webp` }, fallback: fallbackImg.engine, compatibleCars: ['Nissan Leaf'], keywords: ['nissan', 'leaf', 'салон'] },
+    { id: 105, name: 'Масло редуктора EV', car: 'Nissan Leaf', article: 'KLE50-00020', price: 2100, image: { uri: `${BASE_URL}maslo-reduktor.webp` }, fallback: fallbackImg.engine, compatibleCars: ['Nissan Leaf'], keywords: ['nissan', 'leaf', 'масло', 'ev'] },
+  ],
+  'Оптика': [
+    { id: 301, name: 'Передняя фара левая', car: 'Tank 300', article: '4121100XKZ01A', price: 18500, image: { uri: `${BASE_URL}fara.webp` }, fallback: fallbackImg.light, compatibleCars: ['Tank 300'], keywords: ['tank300', 'tank', 'фара'] },
+    { id: 302, name: 'LED фара универсальная', car: 'Универсальная', article: 'LED-UNI-9005', price: 5400, image: { uri: `${BASE_URL}led-fara.webp` }, fallback: fallbackImg.light, compatibleCars: ['Tank 300', 'Toyota Land Cruiser 300', 'Haval H9'], keywords: ['led', 'фара'] },
+    { id: 303, name: 'LED лампа H11', car: 'Nissan Leaf', article: '26296-1KC0B', price: 1800, image: { uri: `${BASE_URL}led-lampa.webp` }, fallback: fallbackImg.light, compatibleCars: ['Nissan Leaf'], keywords: ['nissan', 'leaf', 'led', 'лампа'] },
+  ],
+  'Салон': [
+    { id: 401, name: 'Коврики 3D', car: 'Tank 300', article: 'MAT-T300-3D', price: 3500, image: { uri: `${BASE_URL}kovriki.webp` }, fallback: fallbackImg.seat, compatibleCars: ['Tank 300'], keywords: ['tank300', 'коврики'] },
+    { id: 402, name: 'Коврики 3D', car: 'Toyota LC 300', article: 'MAT-LC300-3D', price: 4200, image: { uri: `${BASE_URL}kovriki-toyota.webp` }, fallback: fallbackImg.seat, compatibleCars: ['Toyota Land Cruiser 300', 'Lexus LX 600'], keywords: ['toyota', 'коврики'] },
+    { id: 403, name: 'Коврики 3D', car: 'Nissan Leaf', article: 'MAT-LEAF-3D', price: 3800, image: { uri: `${BASE_URL}kovriki-leaf.webp` }, fallback: fallbackImg.seat, compatibleCars: ['Nissan Leaf'], keywords: ['nissan', 'leaf', 'коврики'] },
+  ],
+  'Тюнинг': [
+    { id: 501, name: 'Силовой бампер РИФ', car: 'Tank 300', article: 'RIF-T300-F', price: 45000, image: { uri: `${BASE_URL}bamper.webp` }, fallback: fallbackImg.turbo, compatibleCars: ['Tank 300'], keywords: ['tank300', 'бампер', 'риф'] },
+    { id: 502, name: 'Зарядный кабель Type 1', car: 'Nissan Leaf', article: '29120-1KC0A', price: 18500, image: { uri: `${BASE_URL}zaryadka.webp` }, fallback: fallbackImg.turbo, compatibleCars: ['Nissan Leaf'], keywords: ['nissan', 'leaf', 'зарядка'] },
+    { id: 503, name: 'Адаптер CHAdeMO → Type 2', car: 'Nissan Leaf', article: 'CHAD-T2-ADP', price: 12000, image: { uri: `${BASE_URL}adapter.webp` }, fallback: fallbackImg.turbo, compatibleCars: ['Nissan Leaf'], keywords: ['nissan', 'leaf', 'chademo'] },
+  ],
+  'Колёса': [
+    { id: 601, name: 'Шины 265/65 R17', car: 'Универсальные', article: 'MT-265-65-17', price: 14500, image: { uri: `${BASE_URL}shiny-r17.webp` }, fallback: fallbackImg.wheel, compatibleCars: ['Tank 300', 'Toyota Land Cruiser 300', 'Haval H9'], keywords: ['шины', 'r17'] },
+    { id: 602, name: 'Шины 205/55 R16', car: 'Nissan Leaf', article: '205-55-16-ECO', price: 22000, image: { uri: `${BASE_URL}shiny-r16.webp` }, fallback: fallbackImg.wheel, compatibleCars: ['Nissan Leaf'], keywords: ['nissan', 'leaf', 'шины', 'r16'] },
+  ],
+  'Электроника': [
+    { id: 701, name: 'ЭБУ двигателя', car: 'Tank 300', article: 'ECU-T300-2.0T', price: 28000, image: { uri: `${BASE_URL}ebu.webp` }, fallback: fallbackImg.ecu, compatibleCars: ['Tank 300'], keywords: ['tank300', 'эбу', 'ecu'] },
+    { id: 702, name: 'Сканер OBD2', car: 'Nissan Leaf', article: 'OBD2-LEAF-SPY', price: 4500, image: { uri: `${BASE_URL}skaner.webp` }, fallback: fallbackImg.ecu, compatibleCars: ['Nissan Leaf'], keywords: ['nissan', 'leaf', 'obd2', 'сканер'] },
+  ],
+  'Кузов': [
+    { id: 801, name: 'Защита картера', car: 'Tank 300', article: 'SKID-T300-AL', price: 6800, image: { uri: `${BASE_URL}zashita-karter.webp` }, fallback: fallbackImg.body, compatibleCars: ['Tank 300'], keywords: ['tank300', 'защита', 'картер'] },
+    { id: 802, name: 'Защита батареи', car: 'Nissan Leaf', article: 'SKID-LEAF-BAT', price: 9500, image: { uri: `${BASE_URL}zashita-batareya.webp` }, fallback: fallbackImg.body, compatibleCars: ['Nissan Leaf'], keywords: ['nissan', 'leaf', 'защита', 'батарея'] },
+  ],
+};

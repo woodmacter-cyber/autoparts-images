@@ -1,0 +1,21 @@
+// Улучшенная нормализация: убирает все разделители и приводит к нижнему регистру
+export const normalize = (str) =>
+  String(str || '')
+    .toLowerCase()
+    .replace(/[\s\-_\.]+/g, '') // убираем пробелы, дефисы, подчёркивания, точки
+    .trim();
+
+// Нечёткое сравнение: "Tank 300" === "Tank300" === "tank-300"
+export const matchCarName = (a, b) => normalize(a) === normalize(b);
+
+// Проверка: есть ли название авто в списке совместимых
+export const carMatchesAny = (carName, list) => {
+  const normName = normalize(carName);
+  return list.some((item) => {
+    // Прямое совпадение
+    if (normalize(item) === normName) return true;
+    // Частичное совпадение (если одно содержит другое)
+    if (normName.length > 3 && (normalize(item).includes(normName) || normName.includes(normalize(item)))) return true;
+    return false;
+  });
+};
