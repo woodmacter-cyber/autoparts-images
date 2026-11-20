@@ -6,6 +6,10 @@ import { styles } from './src/styles';
 import { fetchProducts } from './src/api/fetchProducts';
 import { fetchCarBrands } from './src/api/fetchCarBrands';
 import { fetchCarCatalog } from './src/api/fetchCarCatalog';
+import { fetchTransportCompanies } from './src/api/fetchTransportCompanies';
+import { submitOrder } from './src/api/submitOrder';
+import { submitRequest } from './src/api/submitRequest';
+import { submitCarRequest } from './src/api/submitCarRequest';
 import { storage } from './src/utils/storage';
 
 import HomeScreen from './src/screens/HomeScreen';
@@ -48,10 +52,18 @@ export default function App() {
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [showRequestPartModal, setShowRequestPartModal] = useState(false);
   const [showRequestNewCarModal, setShowRequestNewCarModal] = useState(false);
+  // Данные, переданные из AddCarModal в запрос нового авто
+  const [pendingCarRequest, setPendingCarRequest] = useState(null);
 
   const [toast, setToast] = useState({ visible: false, message: '', type: 'info' });
   const showToast = useCallback((message, type = 'info') => {
     setToast({ visible: true, message, type });
+  }, []);
+
+  // Перезагрузка списка ТК (используется в CheckoutScreen)
+  const refreshTC = useCallback(async () => {
+    const res = await fetchTransportCompanies();
+    if (res.success) setTransportCompanies(res.data);
   }, []);
 
   useEffect(() => {
@@ -66,19 +78,20 @@ export default function App() {
         if (garageData) setGarageCars(garageData);
         if (cartData) setCart(cartData);
 
-        const [productsRes, brandsRes, catalogRes] = await Promise.all([
+        const [productsRes, brandsRes, catalogRes, tcRes] = await Promise.all([
           fetchProducts(),
           fetchCarBrands(),
           fetchCarCatalog(),
+          fetchTransportCompanies(),
         ]);
-        
+
         if (productsRes.success) {
           setAllProducts(productsRes.data);
           console.log('✅ Товары загружены:', productsRes.data.length);
         } else {
           console.log('❌ Товары НЕ загружены');
         }
-        
+
         if (catalogRes.success) {
           setCarCatalog(catalogRes.data);
           console.log('✅ КАТАЛОГ АВТО ЗАГРУЖЕН, строк:', catalogRes.data.length);
@@ -87,6 +100,13 @@ export default function App() {
           }
         } else {
           console.log('❌ КАТАЛОГ АВТО НЕ ЗАГРУЖЕН');
+        }
+
+        if (tcRes.success) {
+          setTransportCompanies(tcRes.data);
+          console.log('✅ ТК загружены:', tcRes.data.length);
+        } else {
+          console.log('❌ ТК не загружены');
         }
       } catch (error) {
         console.error('Ошибка загрузки:', error);
@@ -167,21 +187,29 @@ export default function App() {
   }, []);
 
   const onCheckout = useCallback(() => setActiveTab('checkout'), []);
-  
+
+  // Реальная отправка заявки на сервер
   const onSubmitOrder = useCallback(async (orderData) => {
-    try {
-      console.log('Отправка заявки:', orderData);
+    const res = await submitOrder(orderData);
+    if (res.success) {
+      console.log('✅ Заявка отправлена, ID:', res.data?.orderId);
       setCart([]);
       setActiveTab('success');
       showToast('Заявка отправлена', 'success');
-    } catch (error) {
-      showToast('Ошибка отправки', 'error');
+    } else {
+      console.log('❌ Ошибка заявки:', res.message);
+      showToast(res.message || 'Ошибка отправки', 'error');
     }
   }, [showToast]);
 
   const onGoHome = useCallback(() => setActiveTab('home'), []);
   const onRequestPart = useCallback(() => setShowRequestPartModal(true), []);
-  const onRequestNewCar = useCallback(() => setShowRequestNewCarModal(true), []);
+
+  // Открыть запрос нового авто (опционально с данными из AddCarModal)
+  const onRequestNewCar = useCallback((data = null) => {
+    setPendingCarRequest(data);
+    setShowRequestNewCarModal(true);
+  }, []);
 
   if (loading) {
     return (
@@ -205,7 +233,7 @@ export default function App() {
       case 'cart':
         return <CartScreen cart={cart} onRemove={onRemoveFromRequest} onClear={onClearCart} onCheckout={onCheckout} onShowToast={showToast} onBack={onBackToHome} onRequestPart={onRequestPart} />;
       case 'checkout':
-        return <CheckoutScreen cart={cart} onBack={() => setActiveTab('cart')} onSubmitOrder={onSubmitOrder} defaultName={profile.name} defaultPhone={profile.phone} onShowToast={showToast} transportCompanies={transportCompanies} refreshTC={() => {}} garageCars={garageCars} />;
+        return <CheckoutScreen cart={cart} onBack={() => setActiveTab('cart')} onSubmitOrder={onSubmitOrder} defaultName={profile.name} defaultPhone={profile.phone} onShowToast={showToast} transportCompanies={transportCompanies} refreshTC={refreshTC} garageCars={garageCars} />;
       case 'success':
         return <OrderSuccessScreen onGoHome={onGoHome} />;
       case 'profile':
@@ -220,7 +248,7 @@ export default function App() {
       <View style={[styles.overlay, { flex: 1 }]}>
         <View style={[styles.container, { flex: 1 }]}>
           <StatusBar style="light" />
-          
+
           <View style={[styles.content, { flex: 1 }]}>
             {renderScreen()}
           </View>
@@ -238,13 +266,56 @@ export default function App() {
             onClose={() => setShowAddCarModal(false)} 
             onSave={onAddCar} 
             carCatalog={carCatalog} 
+            garageCars={garageCars}
             onRequestNewCar={onRequestNewCar} 
           />
           <EditCarModal visible={showEditCarModal} onClose={() => { setShowEditCarModal(false); setEditingCar(null); }} onSave={onSaveEditedCar} car={editingCar} />
           <ConfirmModal visible={showConfirmModal} title="Вы уверены?" message="Это действие нельзя отменить" onCancel={() => setShowConfirmModal(false)} onConfirm={() => { if (confirmAction) confirmAction(); setShowConfirmModal(false); }} />
           <ProductDetailModal visible={showProductDetail} product={selectedProduct} onClose={() => setShowProductDetail(false)} onAddToRequest={onAddToRequest} quantity={cart.find(item => item.id === selectedProduct?.id)?.quantity || 0} />
-          <RequestPartModal visible={showRequestPartModal} onClose={() => setShowRequestPartModal(false)} onSubmit={(data) => { console.log('Запрос запчасти:', data); setShowRequestPartModal(false); showToast('Запрос отправлен', 'success'); }} garageCars={garageCars} profile={profile} />
-          <RequestNewCarModal visible={showRequestNewCarModal} onClose={() => setShowRequestNewCarModal(false)} onSubmit={(data) => { console.log('Запрос нового авто:', data); setShowRequestNewCarModal(false); showToast('Запрос отправлен', 'success'); }} profile={profile} />
+          <RequestPartModal
+            visible={showRequestPartModal}
+            onClose={() => setShowRequestPartModal(false)}
+            onSubmit={async (data) => {
+              const res = await submitRequest(data);
+              setShowRequestPartModal(false);
+              if (res.success) {
+                console.log('✅ Запрос запчасти отправлен, ID:', res.data?.orderId);
+                showToast('Запрос отправлен', 'success');
+              } else {
+                console.log('❌ Ошибка запроса:', res.message);
+                showToast(res.message || 'Ошибка отправки', 'error');
+              }
+            }}
+            garageCars={garageCars}
+            profile={profile}
+          />
+          <RequestNewCarModal
+            visible={showRequestNewCarModal}
+            onClose={() => {
+              setShowRequestNewCarModal(false);
+              setPendingCarRequest(null);
+            }}
+            onSubmit={async (data) => {
+              const res = await submitCarRequest(data);
+              setShowRequestNewCarModal(false);
+              setPendingCarRequest(null);
+              if (res.success) {
+                if (res.data?.status === 'already_exists') {
+                  showToast('Этот автомобиль уже есть в каталоге', 'info');
+                } else if (res.data?.status === 'already_requested') {
+                  showToast('Запрос на этот автомобиль уже отправлен', 'info');
+                } else {
+                  showToast('Запрос отправлен', 'success');
+                }
+              } else {
+                console.log('❌ Ошибка запроса авто:', res.message);
+                showToast(res.message || 'Ошибка отправки', 'error');
+              }
+            }}
+            profile={profile}
+            carCatalog={carCatalog}
+            initialValues={pendingCarRequest}
+          />
 
           <ToastNotification message={toast.message} type={toast.type} visible={toast.visible} onHide={() => setToast({ ...toast, visible: false })} />
         </View>

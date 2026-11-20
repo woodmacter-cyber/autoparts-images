@@ -1,0 +1,1287 @@
+/* ============================================================================
+   AutoPartsPilot — Google Apps Script (бэкенд Google Sheets)
+   Версия 2.2 · ШАГ 1: безопасность данных + частичный расчёт + защита оплаты + КАТАЛОГ
+   ----------------------------------------------------------------------------
+   ЧТО ИЗМЕНЕНО ОТНОСИТЕЛЬНО ПРЕДЫДУЩЕЙ ВЕРСИИ:
+   1. Исправлены битые строки/регулярки (реальные переносы строк заменены на \n).
+   2. УДАЛЕНО нечёткое удаление запросов на авто (Tank 300 ≠ Tank 500).
+      Теперь обрабатываются только ТОЧНЫЕ дубликаты, и по умолчанию они
+      не удаляются, а помечаются статусом (нулевая потеря данных).
+   3. getOrders() возвращает partialPricing / unpricedRows / canPay.
+   4. handlePayOrder() проверяет: все цены заполнены, сумма > 0, заявка не
+      отменена и не оплачена повторно, сумма не изменилась.
+   5. При одобрении авто диапазоны годов в каталоге расширяются (2020-2023 +
+      2024 → 2020-2024), строки каталога никогда не удаляются.
+   6. onEdit больше не вызывает getUi().alert (не работает в простом триггере):
+      вместо этого toast + примечание к ячейке.
+   7. Добавлен type=hide_order (архивация с сохранением статуса).
+   8. Диагностика: ?action=ping и функция checkStructure().
+   9. Защита от повторной отправки одной и той же заявки (идемпотентность).
+   10. ДОБАВЛЕНО: getCarCatalog() для умного автокомплита в приложении.
+   11. БЕЗОПАСНОСТЬ: getOrders/getRequests фильтруют выдачу по телефону клиента.
+   ========================================================================== */
+
+const CONFIG = {
+  VERSION: '2.2',
+
+  SHEET_PRODUCTS: 'Товары',
+  SHEET_TC: 'ТК',
+  SHEET_CATALOG: 'Марки и Модели',
+  SHEET_ORDERS: 'Заявки',
+  SHEET_REQUESTS: 'Запросы',
+  SHEET_CAR_REQUESTS: 'Запросы на авто',
+  SHEET_ARCHIVE_ORDERS: 'Архив заявок',
+  SHEET_ARCHIVE_REQUESTS: 'Архив запросов',
+
+  ORDERS_COLS: 15,   // A..O
+  REQUESTS_COLS: 10, // A..J
+
+  YEAR_MIN: 1950,
+  YEAR_MAX: 2100,
+
+  DELETE_EXACT_DUPLICATES: false,
+  AUTO_SET_PAYMENT_STATUS: true,
+  PAY_MAX_STAGE: 2,
+
+  APPROVE_STATUSES: ['добавлено в каталог', 'добавлено', 'одобрено', 'одобрен', 'готово']
+};
+
+/* ==========================================================================
+   1. БАЗОВЫЕ УТИЛИТЫ
+   ========================================================================== */
+
+function getSS() { return SpreadsheetApp.getActiveSpreadsheet(); }
+function _sheet(name) { return getSS().getSheetByName(name); }
+
+function _json(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function _num(v, d) {
+  if (d === undefined) d = 0;
+  if (v === null || v === undefined || v === '') return d;
+  if (typeof v === 'number') return isFinite(v) ? v : d;
+  const clean = String(v).replace(/[^\d.,-]/g, '').replace(',', '.');
+  const n = Number(clean);
+  return isFinite(n) ? n : d;
+}
+
+function normalizeText(v) {
+  return String(v === null || v === undefined ? '' : v)
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normKey(v) {
+  return normalizeText(v).toLowerCase().replace(/[^a-zа-яё0-9]/g, '');
+}
+
+function _digits(v) {
+  return String(v === null || v === undefined ? '' : v).replace(/\D/g, '');
+}
+
+function _fmtDate(v, withTime) {
+  if (v instanceof Date) {
+    const mask = withTime ? 'dd.MM.yyyy HH:mm' : 'dd.MM.yyyy';
+    return Utilities.formatDate(v, Session.getScriptTimeZone(), mask);
+  }
+  return normalizeText(v);
+}
+
+function _isTrue(v) {
+  if (v === true) return true;
+  const s = String(v === null || v === undefined ? '' : v).trim().toLowerCase();
+  return s === 'true' || s === '1' || s === 'да' || s === 'yes';
+}
+
+function _withLock(fn) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+  } catch (e) {
+    return _json({ status: 'error', message: 'Сервер занят, попробуйте ещё раз' });
+  }
+  try {
+    return fn();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function _toast(message, title) {
+  try {
+    getSS().toast(message, title || 'AutoPartsPilot', 6);
+  } catch (e) {
+    console.log('TOAST: ' + message);
+  }
+}
+
+/* ==========================================================================
+   2. ТОЧКА ВХОДА GET (чтение)
+   ========================================================================== */
+
+function doGet(e) {
+  try {
+    const p = (e && e.parameter) ? e.parameter : {};
+    const action = String(p.action || 'ping');
+
+    if (action === 'getProducts') return getProducts();
+    if (action === 'getTransportCompanies') return getTransportCompanies();
+    // ПРАВКА ШАГ 1: передаём телефон в getOrders / getRequests
+    if (action === 'getOrders') return getOrders(p.phone);
+    if (action === 'getRequests') return getRequests(p.phone);
+    if (action === 'getCarBrands') return getCarBrands();
+    if (action === 'getCarCatalog') return getCarCatalog();
+    if (action === 'ping') return ping();
+
+    return _json({ status: 'error', message: 'Неизвестное действие: ' + action });
+  } catch (err) {
+    return _json({ status: 'error', error: 'Ошибка doGet: ' + String(err) });
+  }
+}
+
+/* ==========================================================================
+   3. ТОВАРЫ (A..L)
+   ========================================================================== */
+
+function getProducts() {
+  try {
+    const sheet = _sheet(CONFIG.SHEET_PRODUCTS);
+    if (!sheet) return _json({ error: 'Лист "Товары" не найден.' });
+
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return _json([]);
+
+    const out = [];
+    for (let i = 1; i < data.length; i++) {
+      const r = data[i];
+      if (!_isTrue(r[10])) continue;
+
+      const year = normalizeText(r[9]);
+      out.push({
+        id: String(r[0] === null || r[0] === undefined ? '' : r[0]),
+        article: normalizeText(r[1]),
+        name: normalizeText(r[2]),
+        brand: normalizeText(r[3]),
+        price: _num(r[4]),
+        category: normalizeText(r[5]),
+        description: normalizeText(r[6]),
+        make: normalizeText(r[7]),
+        model: normalizeText(r[8]),
+        year: year,
+        isUniversal: (!year || year.toUpperCase() === 'ALL'),
+        imageUrl: normalizeText(r[11])
+      });
+    }
+    return _json(out);
+  } catch (err) {
+    return _json({ error: 'Ошибка при чтении товаров: ' + String(err) });
+  }
+}
+
+/* ==========================================================================
+   4. ТРАНСПОРТНЫЕ КОМПАНИИ
+   ========================================================================== */
+
+function getTransportCompanies() {
+  try {
+    const sheet = _sheet(CONFIG.SHEET_TC);
+    if (!sheet) return _json({ error: 'Лист "ТК" не найден.' });
+
+    const data = sheet.getDataRange().getValues();
+    const out = [];
+    for (let i = 1; i < data.length; i++) {
+      const r = data[i];
+      if (_isTrue(r[3]) && normalizeText(r[1])) {
+        out.push({ id: String(r[0]), name: normalizeText(r[1]), city: normalizeText(r[2]) });
+      }
+    }
+    return _json(out);
+  } catch (err) {
+    return _json({ error: 'Ошибка при чтении ТК: ' + String(err) });
+  }
+}
+
+/* ==========================================================================
+   5. МАРКИ И МОДЕЛИ
+   ========================================================================== */
+
+function getCarBrands() {
+  try {
+    const sheet = _sheet(CONFIG.SHEET_CATALOG);
+    if (!sheet) return _json({});
+
+    const data = sheet.getDataRange().getValues();
+    const map = {};
+
+    for (let i = 1; i < data.length; i++) {
+      const brand = normalizeText(data[i][0]);
+      const model = normalizeText(data[i][1]);
+      if (!brand || !model) continue;
+
+      let y1 = parseInt(String(data[i][2] || '').trim(), 10);
+      let y2 = parseInt(String(data[i][3] || '').trim(), 10);
+
+      if (!isFinite(y1) && !isFinite(y2)) continue;
+      if (!isFinite(y1)) y1 = y2;
+      if (!isFinite(y2)) y2 = y1;
+      if (y1 > y2) { const t = y1; y1 = y2; y2 = t; }
+
+      y1 = Math.max(CONFIG.YEAR_MIN, y1);
+      y2 = Math.min(CONFIG.YEAR_MAX, y2);
+      if (y1 > y2) continue;
+
+      if (!map[brand]) map[brand] = {};
+      if (!map[brand][model]) map[brand][model] = {};
+      for (let y = y1; y <= y2; y++) map[brand][model][String(y)] = true;
+    }
+
+    const sorted = {};
+    Object.keys(map).sort(function (a, b) { return a.localeCompare(b, 'en'); }).forEach(function (brand) {
+      sorted[brand] = {};
+      Object.keys(map[brand]).sort(function (a, b) { return a.localeCompare(b, 'en'); }).forEach(function (model) {
+        sorted[brand][model] = Object.keys(map[brand][model])
+          .sort(function (a, b) { return Number(b) - Number(a); });
+      });
+    });
+
+    return _json(sorted);
+  } catch (err) {
+    console.error('getCarBrands: ' + String(err));
+    return _json({});
+  }
+}
+
+/* ==========================================================================
+   5.1. ПОЛНЫЙ КАТАЛОГ АВТО (плоский массив)
+   ========================================================================== */
+function getCarCatalog() {
+  try {
+    const sheet = _sheet(CONFIG.SHEET_CATALOG);
+    if (!sheet) return _json([]);
+
+    const data = sheet.getDataRange().getValues();
+    const catalog = [];
+
+    for (let i = 1; i < data.length; i++) {
+      const brand = normalizeText(data[i][0]);
+      const model = normalizeText(data[i][1]);
+      if (!brand || !model) continue;
+
+      let y1 = parseInt(String(data[i][2] || '').trim(), 10);
+      let y2 = parseInt(String(data[i][3] || '').trim(), 10);
+
+      if (!isFinite(y1) && !isFinite(y2)) continue;
+      if (!isFinite(y1)) y1 = y2;
+      if (!isFinite(y2)) y2 = y1;
+      if (y1 > y2) { const t = y1; y1 = y2; y2 = t; }
+
+      y1 = Math.max(CONFIG.YEAR_MIN, y1);
+      y2 = Math.min(CONFIG.YEAR_MAX, y2);
+      if (y1 > y2) continue;
+
+      catalog.push({
+        make: brand,
+        model: model,
+        yearFrom: y1,
+        yearTo: y2
+      });
+    }
+
+    return _json(catalog);
+  } catch (err) {
+    console.error('getCarCatalog: ' + String(err));
+    return _json([]);
+  }
+}
+
+/* ==========================================================================
+   6. ЗАЯВКИ (A..O) — ПРАВКА ШАГ 2
+   ========================================================================== */
+
+function getOrders(phone) {
+  try {
+    const sheet = _sheet(CONFIG.SHEET_ORDERS);
+    if (!sheet) return _json([]);
+
+    // ПРАВКА ШАГ 2а: ранний выход без телефона
+    const myDigits = _digits(phone);
+    if (!myDigits) return _json([]);
+
+    const data = sheet.getDataRange().getValues();
+    const map = {};
+
+    for (let i = 1; i < data.length; i++) {
+      const r = data[i];
+      const orderId = normalizeText(r[1]);
+      if (!orderId) continue;
+      // ПРАВКА ШАГ 2б: фильтр по телефону
+      if (_digits(r[3]) !== myDigits) continue;
+
+      const qty = Math.max(1, _num(r[7], 1));
+      const price = _num(r[8], 0);
+      const exact = _num(r[9], 0);
+      const statusRaw = normalizeText(r[10]) || 'Заявка отправлена';
+      const stage = getStageIndex(statusRaw);
+      const paidAt = _fmtDate(r[14], true);
+
+      const item = {
+        name: String(r[5] || ''),
+        article: String(r[6] || ''),
+        quantity: qty,
+        price: price,
+        exact: exact
+      };
+
+      if (map[orderId]) {
+        const o = map[orderId];
+        o.items.push(item);
+        o.total += price * qty;
+        o.exactTotal += exact;
+        o.itemsCount += qty;
+        o.rowsCount += 1;
+        if (price <= 0 || exact <= 0) o.unpricedRows += 1;
+        if (!o.paidAt && paidAt) o.paidAt = paidAt;
+
+        if (stage === -2) { o._stage = -2; o.status = statusRaw; }
+        else if (stage === -1 && o._stage !== -2) { o._stage = -1; o.status = statusRaw; }
+        else if (o._stage >= 0 && stage > o._stage) { o._stage = stage; o.status = statusRaw; }
+      } else {
+        map[orderId] = {
+          id: orderId,
+          date: _fmtDate(r[0], false),
+          customer: String(r[2] || ''),
+          phone: String(r[3] || ''),
+          vin: String(r[4] || ''),
+          transportCompany: String(r[11] || ''),
+          address: String(r[12] || ''),
+          comment: String(r[13] || ''),
+          paidAt: paidAt,
+          total: price * qty,
+          exactTotal: exact,
+          itemsCount: qty,
+          rowsCount: 1,
+          unpricedRows: (price <= 0 || exact <= 0) ? 1 : 0,
+          status: statusRaw,
+          _stage: stage,
+          items: [item],
+          type: 'order'
+        };
+      }
+    }
+
+    const out = Object.keys(map).map(function (k) {
+      const o = map[k];
+      o.partialPricing = o.unpricedRows > 0;
+      o.canPay = !o.partialPricing && o.exactTotal > 0 &&
+                 o._stage >= 0 && o._stage <= CONFIG.PAY_MAX_STAGE;
+      delete o._stage;
+      return o;
+    }).sort(function (a, b) {
+      return String(b.id).localeCompare(String(a.id), undefined, { numeric: true });
+    });
+
+    return _json(out);
+  } catch (err) {
+    return _json({ error: 'Ошибка при чтении заявок: ' + String(err) });
+  }
+}
+
+/* ==========================================================================
+   7. ЗАПРОСЫ (A..J) — ПРАВКА ШАГ 3
+   ========================================================================== */
+
+function getRequests(phone) {
+  try {
+    const sheet = _sheet(CONFIG.SHEET_REQUESTS);
+    if (!sheet) return _json([]);
+
+    // ПРАВКА ШАГ 3а: ранний выход без телефона
+    const myDigits = _digits(phone);
+    if (!myDigits) return _json([]);
+
+    const data = sheet.getDataRange().getValues();
+    const map = {};
+
+    for (let i = 1; i < data.length; i++) {
+      const r = data[i];
+      const reqId = normalizeText(r[1]);
+      if (!reqId) continue;
+      // ПРАВКА ШАГ 3б: фильтр по телефону
+      if (_digits(r[3]) !== myDigits) continue;
+
+      const statusRaw = normalizeText(r[9]) || 'Отправлен';
+      const stage = getRequestStageIndex(statusRaw);
+      const item = {
+        name: String(r[6] || 'Запрос запчасти'),
+        article: String(r[7] || ''),
+        quantity: 1,
+        price: 0
+      };
+
+      if (map[reqId]) {
+        const o = map[reqId];
+        o.items.push(item);
+        o.itemsCount += 1;
+        if (stage === -1 && o._stage !== 3) { o._stage = -1; o.status = statusRaw; }
+        else if (o._stage >= 0 && stage > o._stage) { o._stage = stage; o.status = statusRaw; }
+      } else {
+        map[reqId] = {
+          id: reqId,
+          date: _fmtDate(r[0], false),
+          customer: String(r[2] || ''),
+          phone: String(r[3] || ''),
+          vin: String(r[4] || ''),
+          car: String(r[5] || ''),
+          comment: String(r[8] || ''),
+          total: 0,
+          exactTotal: 0,
+          itemsCount: 1,
+          rowsCount: 1,
+          unpricedRows: 0,
+          partialPricing: false,
+          status: statusRaw,
+          _stage: stage,
+          items: [item],
+          type: 'request',
+          transportCompany: '',
+          address: ''
+        };
+      }
+    }
+
+    const out = Object.keys(map).map(function (k) {
+      const o = map[k];
+      delete o._stage;
+      return o;
+    }).sort(function (a, b) {
+      return String(b.id).localeCompare(String(a.id), undefined, { numeric: true });
+    });
+
+    return _json(out);
+  } catch (err) {
+    return _json({ error: 'Ошибка при чтении запросов: ' + String(err) });
+  }
+}
+
+/* ==========================================================================
+   8. СТАТУСЫ
+   ========================================================================== */
+
+function getStageIndex(status) {
+  if (!status) return 0;
+  const s = String(status).toLowerCase().trim();
+  if (s.indexOf('отменен') !== -1 || s.indexOf('отменено') !== -1) return -1;
+  if (s.indexOf('удален клиентом') !== -1 || s.indexOf('удалено клиентом') !== -1) return -1;
+  if (s.indexOf('ошибка отправки') !== -1) return -2;
+  if (s.indexOf('получен') !== -1 || s.indexOf('выдан клиенту') !== -1) return 8;
+  if (s.indexOf('готов к выдаче') !== -1 || s.indexOf('готово к выдаче') !== -1) return 7;
+  if (s.indexOf('на складе в рф') !== -1 || s.indexOf('склад рф') !== -1 || s.indexOf('прибыл в рф') !== -1) return 6;
+  if (s.indexOf('в пути') !== -1 || s.indexOf('таможн') !== -1 || s.indexOf('транзит') !== -1) return 5;
+  if (s.indexOf('на складе в китае') !== -1 || s.indexOf('склад китая') !== -1) return 4;
+  if (s.indexOf('оплачен') !== -1 || s.indexOf('оплатил') !== -1 || s.indexOf('закуп') !== -1 || s.indexOf('выкуп') !== -1) return 3;
+  if (s.indexOf('оплата') !== -1 || s.indexOf('оплату') !== -1) return 2;
+  if (s.indexOf('расчет') !== -1 || s.indexOf('расчит') !== -1 || s.indexOf('рассчит') !== -1) return 1;
+  return 0;
+}
+
+function getRequestStageIndex(status) {
+  if (!status) return 0;
+  const s = String(status).toLowerCase().trim();
+  if (s.indexOf('отменен') !== -1 || s.indexOf('отменено') !== -1) return -1;
+  if (s.indexOf('отклонен') !== -1 || s.indexOf('отклонён') !== -1) return 3;
+  if (s.indexOf('выполнен') !== -1 || s.indexOf('завершен') !== -1 || s.indexOf('завершён') !== -1) return 2;
+  if (s.indexOf('в работе') !== -1 || s.indexOf('принят') !== -1) return 1;
+  return 0;
+}
+
+/* ==========================================================================
+   9. ТОЧКА ВХОДА POST (запись)
+   ========================================================================== */
+
+function doPost(e) {
+  try {
+    if (!e || !e.postData || !e.postData.contents) {
+      return _json({ status: 'error', message: 'Нет тела запроса' });
+    }
+    const data = JSON.parse(e.postData.contents);
+    const ss = getSS();
+    const type = String(data.type || '');
+
+    if (type === 'order') return handleOrder(ss, data);
+    if (type === 'request') return handleRequest(ss, data);
+    if (type === 'add_car_request') return handleAddCarRequest(ss, data);
+    if (type === 'pay_order') return handlePayOrder(ss, data);
+    if (type === 'cancel_order' || type === 'delete_order' ||
+        type === 'complete_order' || type === 'hide_order') return handleArchive(ss, data);
+
+    return _json({ status: 'error', message: 'Неизвестный type: ' + type });
+  } catch (err) {
+    return _json({ status: 'error', message: String(err) });
+  }
+}
+
+/* ==========================================================================
+   10. СЛУЖЕБНЫЕ ФУНКЦИИ ЗАПИСИ
+   ========================================================================== */
+
+function getFirstEmptyRow(sheet, idColIndex) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 2;
+  const ids = sheet.getRange(2, idColIndex, lastRow - 1, 1).getValues();
+  for (let i = 0; i < ids.length; i++) {
+    if (!ids[i][0] || String(ids[i][0]).trim() === '') return i + 2;
+  }
+  return lastRow + 1;
+}
+
+function _findRowsById(sheet, orderId) {
+  const rows = [];
+  if (!orderId) return rows;
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return rows;
+  const ids = sheet.getRange(2, 2, lastRow - 1, 1).getValues();
+  for (let i = 0; i < ids.length; i++) {
+    if (normalizeText(ids[i][0]) === orderId) rows.push(i + 2);
+  }
+  return rows;
+}
+
+function generateOrderId(sheetName, prefix) {
+  const archiveName = (sheetName === CONFIG.SHEET_ORDERS)
+    ? CONFIG.SHEET_ARCHIVE_ORDERS
+    : CONFIG.SHEET_ARCHIVE_REQUESTS;
+
+  let maxNum = 0;
+  [sheetName, archiveName].forEach(function (name) {
+    const sheet = _sheet(name);
+    if (!sheet) return;
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return;
+    const ids = sheet.getRange(2, 2, lastRow - 1, 1).getValues();
+    for (let i = 0; i < ids.length; i++) {
+      const numStr = String(ids[i][0] || '').trim().replace(/^[A-Za-z]+-/, '');
+      const num = parseInt(numStr, 10);
+      if (isFinite(num) && num > maxNum) maxNum = num;
+    }
+  });
+
+  if (maxNum === 0) maxNum = Math.floor(Date.now() / 1000) % 100000;
+  return prefix + (maxNum + 1);
+}
+
+/* ==========================================================================
+   11. СОЗДАНИЕ ЗАЯВКИ
+   ========================================================================== */
+
+function handleOrder(ss, data) {
+  return _withLock(function () {
+    const sheet = ss.getSheetByName(CONFIG.SHEET_ORDERS);
+    if (!sheet) return _json({ status: 'error', message: 'Лист "Заявки" не найден' });
+
+    const items = Array.isArray(data.items) ? data.items : (data.items ? [data.items] : []);
+    if (!items.length) return _json({ status: 'error', message: 'Пустой состав заявки' });
+
+    const name = normalizeText(data.name || data.customer);
+    const phone = normalizeText(data.phone);
+    const vin = normalizeText(data.vin).toUpperCase();
+
+    let orderId = normalizeText(data.orderId);
+
+    if (orderId) {
+      const existing = _findRowsById(sheet, orderId);
+      if (existing.length) {
+        const existingPhone = _digits(sheet.getRange(existing[0], 4).getValue());
+        if (existingPhone === _digits(phone)) {
+          return _json({ status: 'ok', orderId: orderId, duplicate: true });
+        }
+        orderId = '';
+      }
+    }
+    if (!orderId) orderId = generateOrderId(CONFIG.SHEET_ORDERS, 'ORD-');
+
+    const rows = items.map(function (it) {
+      return [
+        new Date(), orderId, name, phone, vin,
+        normalizeText(it.name) || 'Запчасть',
+        normalizeText(it.article) || 'Не указан',
+        Math.max(1, _num(it.quantity, 1)),
+        _num(it.price, 0),
+        '',
+        'Заявка отправлена',
+        normalizeText(data.tcName) || 'Не выбрана',
+        normalizeText(data.address),
+        normalizeText(data.comment),
+        ''
+      ];
+    });
+
+    const startRow = getFirstEmptyRow(sheet, 2);
+    sheet.getRange(startRow, 1, rows.length, CONFIG.ORDERS_COLS).setValues(rows);
+    sheet.getRange(startRow, 4, rows.length, 2).setNumberFormat('@');
+
+    return _json({ status: 'ok', orderId: orderId, rows: rows.length });
+  });
+}
+
+/* ==========================================================================
+   12. СОЗДАНИЕ ЗАПРОСА ЗАПЧАСТИ
+   ========================================================================== */
+
+function handleRequest(ss, data) {
+  return _withLock(function () {
+    const sheet = ss.getSheetByName(CONFIG.SHEET_REQUESTS);
+    if (!sheet) return _json({ status: 'error', message: 'Лист "Запросы" не найден' });
+
+    const items = Array.isArray(data.items) ? data.items : (data.items ? [data.items] : []);
+    if (!items.length) return _json({ status: 'error', message: 'Пустой состав запроса' });
+
+    const customer = normalizeText(data.customer || data.name) || 'Клиент';
+    const phone = normalizeText(data.phone);
+    const vin = normalizeText(data.vin).toUpperCase();
+    const car = normalizeText(data.car);
+
+    let reqId = normalizeText(data.orderId);
+    if (reqId) {
+      const existing = _findRowsById(sheet, reqId);
+      if (existing.length) {
+        const existingPhone = _digits(sheet.getRange(existing[0], 4).getValue());
+        if (existingPhone === _digits(phone)) {
+          return _json({ status: 'ok', orderId: reqId, duplicate: true });
+        }
+        reqId = '';
+      }
+    }
+    if (!reqId) reqId = generateOrderId(CONFIG.SHEET_REQUESTS, 'REQ-');
+
+    const rows = items.map(function (it) {
+      return [
+        new Date(), reqId, customer, phone, vin, car,
+        normalizeText(it.name) || 'Запчасть',
+        normalizeText(it.article),
+        normalizeText(data.comment),
+        'Отправлен'
+      ];
+    });
+
+    const startRow = getFirstEmptyRow(sheet, 2);
+    sheet.getRange(startRow, 1, rows.length, CONFIG.REQUESTS_COLS).setValues(rows);
+    sheet.getRange(startRow, 4, rows.length, 2).setNumberFormat('@');
+
+    return _json({ status: 'ok', orderId: reqId, rows: rows.length });
+  });
+}
+
+/* ==========================================================================
+   13. ЗАПРОС НОВОГО АВТО
+   ========================================================================== */
+
+function handleAddCarRequest(ss, data) {
+  return _withLock(function () {
+    const brand = normalizeText(data.brand);
+    const model = normalizeText(data.model);
+    const year = normalizeText(data.year);
+
+    if (!brand || !model) {
+      return _json({ status: 'error', message: 'Марка и модель обязательны' });
+    }
+    if (year && !/^\d{4}$/.test(year)) {
+      return _json({ status: 'error', message: 'Год должен быть в формате 2023' });
+    }
+
+    const brandKey = normKey(brand);
+    const modelKey = normKey(model);
+    const reqYear = parseInt(year, 10);
+
+    const catalogSheet = ss.getSheetByName(CONFIG.SHEET_CATALOG);
+    if (catalogSheet && isFinite(reqYear)) {
+      const cat = catalogSheet.getDataRange().getValues();
+      for (let i = 1; i < cat.length; i++) {
+        if (normKey(cat[i][0]) !== brandKey || normKey(cat[i][1]) !== modelKey) continue;
+        let y1 = parseInt(String(cat[i][2] || '').trim(), 10);
+        let y2 = parseInt(String(cat[i][3] || '').trim(), 10);
+        if (!isFinite(y1) && !isFinite(y2)) continue;
+        if (!isFinite(y1)) y1 = y2;
+        if (!isFinite(y2)) y2 = y1;
+        if (y1 > y2) { const t = y1; y1 = y2; y2 = t; }
+        if (reqYear >= y1 && reqYear <= y2) {
+          return _json({ status: 'already_exists', message: 'Этот автомобиль уже есть в каталоге' });
+        }
+      }
+    }
+
+    const requestsSheet = ss.getSheetByName(CONFIG.SHEET_CAR_REQUESTS);
+    if (!requestsSheet) {
+      return _json({ status: 'error', message: 'Лист "Запросы на авто" не найден' });
+    }
+    const req = requestsSheet.getDataRange().getValues();
+    for (let i = 1; i < req.length; i++) {
+      const status = normalizeText(req[i][4]).toLowerCase();
+      if (status === 'отклонено' || status === 'отклонён') continue;
+      if (normKey(req[i][1]) === brandKey &&
+          normKey(req[i][2]) === modelKey &&
+          normKey(req[i][3]) === normKey(year)) {
+        return _json({ status: 'already_requested', message: 'Запрос на этот автомобиль уже отправлен' });
+      }
+    }
+
+    requestsSheet.appendRow([new Date(), brand, model, year, 'На рассмотрении']);
+    return _json({ status: 'ok' });
+  });
+}
+
+/* ==========================================================================
+   14. ОПЛАТА
+   ========================================================================== */
+
+function handlePayOrder(ss, data) {
+  return _withLock(function () {
+    const sheet = ss.getSheetByName(CONFIG.SHEET_ORDERS);
+    if (!sheet) return _json({ status: 'error', message: 'Лист "Заявки" не найден' });
+
+    const targetId = normalizeText(data.orderId);
+    if (!targetId) return _json({ status: 'error', message: 'orderId не указан' });
+
+    const values = sheet.getDataRange().getValues();
+    const rows = [];
+    let unpriced = 0;
+    let exactTotal = 0;
+
+    for (let i = 1; i < values.length; i++) {
+      if (normalizeText(values[i][1]) !== targetId) continue;
+      const price = _num(values[i][8], 0);
+      const exact = _num(values[i][9], 0);
+      if (price <= 0 || exact <= 0) unpriced++;
+      exactTotal += exact;
+      rows.push({ row: i + 1, stage: getStageIndex(values[i][10]) });
+    }
+
+    if (!rows.length) return _json({ status: 'error', message: 'Заявка не найдена' });
+
+    let eff = 0;
+    rows.forEach(function (r) {
+      if (r.stage === -2) eff = -2;
+      else if (r.stage === -1 && eff !== -2) eff = -1;
+      else if (eff >= 0 && r.stage > eff) eff = r.stage;
+    });
+
+    if (eff === -1) {
+      return _json({ status: 'error', message: 'Заявка отменена — оплата невозможна' });
+    }
+    if (eff >= 3) {
+      return _json({ status: 'error', message: 'Заявка уже оплачена' });
+    }
+    if (unpriced > 0) {
+      return _json({
+        status: 'error',
+        message: 'Не все позиции рассчитаны менеджером (' + unpriced + ' из ' + rows.length + ')',
+        partialPricing: true
+      });
+    }
+    if (exactTotal <= 0) {
+      return _json({ status: 'error', message: 'Не рассчитана точная сумма' });
+    }
+
+    const clientTotal = _num(data.exactTotal, 0);
+    if (clientTotal > 0 && Math.abs(clientTotal - exactTotal) > 1) {
+      return _json({
+        status: 'error',
+        message: 'Сумма изменилась. Обновите заявку и попробуйте снова.',
+        exactTotal: exactTotal
+      });
+    }
+
+    const now = new Date();
+    rows.forEach(function (r) {
+      sheet.getRange(r.row, 11).setValue('Оплачено');
+      if (!sheet.getRange(r.row, 15).getValue()) {
+        sheet.getRange(r.row, 15).setValue(now);
+      }
+    });
+
+    return _json({
+      status: 'ok',
+      rowsUpdated: rows.length,
+      exactTotal: exactTotal,
+      paidAt: _fmtDate(now, true)
+    });
+  });
+}
+
+/* ==========================================================================
+   15. АРХИВАЦИЯ
+   ========================================================================== */
+
+function handleArchive(ss, data) {
+  return _withLock(function () {
+    const orderId = normalizeText(data.orderId);
+    if (!orderId) return _json({ status: 'error', message: 'orderId не указан' });
+
+    const type = String(data.type || '');
+    const keepStatus = (type === 'hide_order');
+
+    const orderStatus = keepStatus ? null
+      : (type === 'cancel_order' ? 'Отменено'
+      : (type === 'delete_order' ? 'Удалено клиентом' : 'Получено клиентом'));
+
+    const requestStatus = keepStatus ? null
+      : (type === 'cancel_order' ? 'Отменено'
+      : (type === 'delete_order' ? 'Удалено клиентом' : 'Выполнен'));
+
+    const r1 = _archiveFromSheet(ss, CONFIG.SHEET_ORDERS, CONFIG.SHEET_ARCHIVE_ORDERS,
+      orderId, orderStatus, CONFIG.ORDERS_COLS, 11);
+    if (r1.moved) return _json({ status: 'ok', sheet: CONFIG.SHEET_ORDERS, rows: r1.count });
+
+    const r2 = _archiveFromSheet(ss, CONFIG.SHEET_REQUESTS, CONFIG.SHEET_ARCHIVE_REQUESTS,
+      orderId, requestStatus, CONFIG.REQUESTS_COLS, 10);
+    if (r2.moved) return _json({ status: 'ok', sheet: CONFIG.SHEET_REQUESTS, rows: r2.count });
+
+    return _json({ status: 'error', message: 'Заявка не найдена' });
+  });
+}
+
+function _archiveFromSheet(ss, sourceName, archiveName, orderId, targetStatus, colCount, statusColNum) {
+  const sheet = ss.getSheetByName(sourceName);
+  if (!sheet) return { moved: false, count: 0 };
+
+  let archive = ss.getSheetByName(archiveName);
+  if (!archive) {
+    archive = ss.insertSheet(archiveName);
+    const headerRow = sheet.getLastRow() >= 1
+      ? sheet.getRange(1, 1, 1, colCount).getValues()[0] : [];
+    if (headerRow.length) archive.appendRow(headerRow);
+  }
+
+  const values = sheet.getDataRange().getValues();
+  const rowsToArchive = [];
+  const rowsToDelete = [];
+
+  for (let i = 1; i < values.length; i++) {
+    if (normalizeText(values[i][1]) !== orderId) continue;
+    const row = values[i].slice(0, colCount);
+    while (row.length < colCount) row.push('');
+    if (targetStatus !== null) row[statusColNum - 1] = targetStatus;
+    rowsToArchive.push(row);
+    rowsToDelete.push(i + 1);
+  }
+
+  if (!rowsToArchive.length) return { moved: false, count: 0 };
+
+  const startRow = archive.getLastRow() + 1;
+  archive.getRange(startRow, 1, rowsToArchive.length, colCount).setValues(rowsToArchive);
+  archive.getRange(startRow, 4, rowsToArchive.length, 2).setNumberFormat('@');
+
+  rowsToDelete.sort(function (a, b) { return b - a; }).forEach(function (idx) {
+    sheet.deleteRow(idx);
+  });
+
+  return { moved: true, count: rowsToArchive.length };
+}
+
+/* ==========================================================================
+   16. НЕЧЁТКОЕ СРАВНЕНИЕ
+   ========================================================================== */
+
+function levenshteinDistance(a, b) {
+  a = normKey(a);
+  b = normKey(b);
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+
+  const matrix = [];
+  for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j] + 1
+        );
+      }
+    }
+  }
+  return matrix[b.length][a.length];
+}
+
+/* ==========================================================================
+   17. ДОБАВЛЕНИЕ АВТО В КАТАЛОГ
+   ========================================================================== */
+
+function _addCarToCatalog(ss, brand, model, year) {
+  const sheet = ss.getSheetByName(CONFIG.SHEET_CATALOG);
+  if (!sheet) return { ok: false, reason: 'Нет листа "Марки и Модели"' };
+
+  const y = parseInt(String(year || '').trim(), 10);
+  if (!isFinite(y) || y < CONFIG.YEAR_MIN || y > CONFIG.YEAR_MAX) {
+    return { ok: false, reason: 'Год "' + year + '" не распознан — добавьте в каталог вручную' };
+  }
+
+  const brandKey = normKey(brand);
+  const modelKey = normKey(model);
+  const data = sheet.getDataRange().getValues();
+  const sameCar = [];
+
+  for (let i = 1; i < data.length; i++) {
+    if (normKey(data[i][0]) !== brandKey || normKey(data[i][1]) !== modelKey) continue;
+    let y1 = parseInt(String(data[i][2] || '').trim(), 10);
+    let y2 = parseInt(String(data[i][3] || '').trim(), 10);
+    sameCar.push({ row: i + 1, y1: y1, y2: y2 });
+  }
+
+  for (let k = 0; k < sameCar.length; k++) {
+    const s = sameCar[k];
+    if (isFinite(s.y1) && isFinite(s.y2) && y >= Math.min(s.y1, s.y2) && y <= Math.max(s.y1, s.y2)) {
+      return { ok: true, action: 'exists', message: brand + ' ' + model + ' ' + y + ' уже в каталоге' };
+    }
+  }
+
+  for (let k = 0; k < sameCar.length; k++) {
+    const s = sameCar[k];
+    if (!isFinite(s.y1) && !isFinite(s.y2)) {
+      sheet.getRange(s.row, 3).setValue(y);
+      sheet.getRange(s.row, 4).setValue(y);
+      return { ok: true, action: 'filled', message: 'Годы заполнены: ' + brand + ' ' + model + ' ' + y };
+    }
+  }
+
+  for (let k = 0; k < sameCar.length; k++) {
+    const s = sameCar[k];
+    let a = isFinite(s.y1) ? s.y1 : s.y2;
+    let b = isFinite(s.y2) ? s.y2 : s.y1;
+    if (a > b) { const t = a; a = b; b = t; }
+    if (y === a - 1 || y === b + 1) {
+      const newA = Math.min(a, y);
+      const newB = Math.max(b, y);
+      sheet.getRange(s.row, 3).setValue(newA);
+      sheet.getRange(s.row, 4).setValue(newB);
+      return {
+        ok: true, action: 'merged',
+        message: 'Диапазон расширен: ' + brand + ' ' + model + ' ' + newA + '-' + newB
+      };
+    }
+  }
+
+  sheet.appendRow([brand, model, y, y]);
+  return { ok: true, action: 'added', message: 'Добавлено в каталог: ' + brand + ' ' + model + ' ' + y };
+}
+
+/* ==========================================================================
+   18. onEdit
+   ========================================================================== */
+
+function onEdit(e) {
+  if (!e || !e.range) return;
+
+  const cache = CacheService.getScriptCache();
+  if (cache.get('app_onedit_busy') === '1') return;
+
+  try {
+    cache.put('app_onedit_busy', '1', 5);
+    const sheet = e.range.getSheet();
+    const name = sheet.getName();
+
+    if (name === CONFIG.SHEET_PRODUCTS) { _onEditProducts(e, sheet); return; }
+    if (name === CONFIG.SHEET_CAR_REQUESTS) { _onEditCarRequests(e, sheet); return; }
+    if (name === CONFIG.SHEET_ORDERS) { _onEditOrders(e, sheet); return; }
+  } catch (err) {
+    console.error('Ошибка в onEdit: ' + String(err));
+  } finally {
+    cache.remove('app_onedit_busy');
+  }
+}
+
+function _onEditProducts(e, sheet) {
+  const range = e.range;
+  const row = range.getRow();
+  const col = range.getColumn();
+  if (row < 2) return;
+  if (range.getNumRows() > 1 || range.getNumColumns() > 1) return;
+
+  if (col >= 1 && col <= 12) {
+    const idCell = sheet.getRange(row, 1);
+    if (!normalizeText(idCell.getValue())) {
+      const lastRow = sheet.getLastRow();
+      let maxId = 0;
+      if (lastRow >= 2) {
+        const ids = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+        for (let i = 0; i < ids.length; i++) {
+          const n = parseInt(String(ids[i][0] || '').trim(), 10);
+          if (isFinite(n) && n > maxId) maxId = n;
+        }
+      }
+      idCell.setValue(maxId + 1);
+    }
+  }
+
+  if (col === 10) {
+    const cell = sheet.getRange(row, 10);
+    const value = normalizeText(cell.getValue());
+    const isValid = value === '' ||
+      value.toUpperCase() === 'ALL' ||
+      /^\d{4}$/.test(value) ||
+      /^\d{4}\s*[-–—]\s*\d{4}$/.test(value);
+
+    if (!isValid) {
+      cell.clearContent();
+      cell.setBackground('#f4cccc');
+      cell.setNote('Неверный формат года: "' + value + '"\n' +
+        'Допустимо:\n' +
+        '• пусто или ALL — универсальный товар\n' +
+        '• 2021 — конкретный год\n' +
+        '• 2020-2024 — диапазон');
+      _toast('Год "' + value + '" неверный. Форматы: пусто / ALL / 2021 / 2020-2024', 'Товары: год');
+    } else {
+      cell.setBackground(null);
+      cell.clearNote();
+    }
+  }
+
+  if (col === 2) {
+    const article = normalizeText(range.getValue());
+    if (!article) return;
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return;
+    const articles = sheet.getRange(2, 2, lastRow - 1, 1).getValues();
+    for (let i = 0; i < articles.length; i++) {
+      const rowNum = i + 2;
+      if (rowNum === row) continue;
+      if (normalizeText(articles[i][0]).toLowerCase() === article.toLowerCase()) {
+        sheet.getRange(row, 2).setNote('Возможный дубликат артикула: строка ' + rowNum);
+        _toast('Артикул "' + article + '" уже есть в строке ' + rowNum, 'Товары: дубликат');
+        break;
+      }
+    }
+  }
+}
+
+function _onEditCarRequests(e, sheet) {
+  const range = e.range;
+  const col = range.getColumn();
+  const row = range.getRow();
+  if (col !== 5 || row < 2) return;
+  if (range.getNumRows() > 1 || range.getNumColumns() > 1) return;
+
+  const status = normalizeText(range.getValue());
+  if (CONFIG.APPROVE_STATUSES.indexOf(status.toLowerCase()) === -1) return;
+
+  const brand = normalizeText(sheet.getRange(row, 2).getValue());
+  const model = normalizeText(sheet.getRange(row, 3).getValue());
+  const year = normalizeText(sheet.getRange(row, 4).getValue());
+
+  if (!brand || !model) {
+    _toast('Не заполнены марка/модель — в каталог не добавлено', 'Запросы на авто');
+    return;
+  }
+
+  const result = _addCarToCatalog(e.source, brand, model, year);
+  if (!result.ok) {
+    sheet.getRange(row, 5).setNote(result.reason);
+    _toast(result.reason, 'Запросы на авто');
+    return;
+  }
+
+  sheet.getRange(row, 5).setNote(result.message + '\nОбработано: ' +
+    Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'dd.MM.yyyy HH:mm'));
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) { _toast(result.message, 'Каталог'); return; }
+
+  const data = sheet.getRange(2, 1, lastRow - 1, 5).getValues();
+  const brandKey = normKey(brand);
+  const modelKey = normKey(model);
+  const yearKey = normKey(year);
+
+  const exactDuplicates = [];
+  const similarRows = [];
+
+  for (let i = 0; i < data.length; i++) {
+    const rowNum = i + 2;
+    if (rowNum === row) continue;
+
+    const st = normalizeText(data[i][4]).toLowerCase();
+    if (st === 'отклонено' || st === 'отклонён') continue;
+
+    const bK = normKey(data[i][1]);
+    const mK = normKey(data[i][2]);
+    const yK = normKey(data[i][3]);
+    if (!bK || !mK) continue;
+
+    if (bK === brandKey && mK === modelKey && yK === yearKey) {
+      exactDuplicates.push(rowNum);
+      continue;
+    }
+
+    if (bK === brandKey && yK === yearKey && levenshteinDistance(mK, modelKey) <= 1) {
+      similarRows.push(rowNum);
+    }
+  }
+
+  similarRows.forEach(function (rn) {
+    sheet.getRange(rn, 5).setNote('Похожий запрос обработан в строке ' + row +
+      ' (' + brand + ' ' + model + ' ' + year + ').\nПроверьте вручную — это может быть ДРУГАЯ модель.');
+  });
+
+  if (CONFIG.DELETE_EXACT_DUPLICATES) {
+    exactDuplicates.sort(function (a, b) { return b - a; }).forEach(function (rn) {
+      sheet.deleteRow(rn);
+    });
+  } else {
+    exactDuplicates.forEach(function (rn) {
+      sheet.getRange(rn, 5).setValue(status);
+      sheet.getRange(rn, 5).setNote('Точный дубликат строки ' + row + ' — обработан вместе с ней.');
+    });
+  }
+
+  const dupInfo = exactDuplicates.length
+    ? (' · дубликатов: ' + exactDuplicates.length + (CONFIG.DELETE_EXACT_DUPLICATES ? ' (удалены)' : ' (помечены)'))
+    : '';
+  _toast(result.message + dupInfo, 'Запросы на авто');
+}
+
+function _onEditOrders(e, sheet) {
+  const range = e.range;
+  const col = range.getColumn();
+  const row = range.getRow();
+  if (row < 2) return;
+  if (range.getNumRows() > 1 || range.getNumColumns() > 1) return;
+  if (col !== 9 && col !== 10 && col !== 11) return;
+
+  const orderId = normalizeText(sheet.getRange(row, 2).getValue());
+  if (!orderId) return;
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  const data = sheet.getRange(2, 1, lastRow - 1, CONFIG.ORDERS_COLS).getValues();
+
+  const rows = [];
+  let unpriced = 0;
+  let exactTotal = 0;
+  let eff = 0;
+
+  for (let i = 0; i < data.length; i++) {
+    if (normalizeText(data[i][1]) !== orderId) continue;
+    const price = _num(data[i][8], 0);
+    const exact = _num(data[i][9], 0);
+    if (price <= 0 || exact <= 0) unpriced++;
+    exactTotal += exact;
+    const st = getStageIndex(data[i][10]);
+    if (st === -2) eff = -2;
+    else if (st === -1 && eff !== -2) eff = -1;
+    else if (eff >= 0 && st > eff) eff = st;
+    rows.push(i + 2);
+  }
+
+  if (!rows.length) return;
+
+  if (col === 11 && eff === 2) {
+    const cell = sheet.getRange(row, 11);
+    if (unpriced > 0) {
+      cell.setNote('ВНИМАНИЕ: не рассчитано позиций: ' + unpriced + ' из ' + rows.length +
+        '.\nКлиент НЕ сможет оплатить, пока не заполнены столбцы I (цена) и J (точная сумма).');
+      cell.setBackground('#fff2cc');
+      _toast('Не рассчитано позиций: ' + unpriced + ' из ' + rows.length +
+        ' — клиент пока не может оплатить', 'Заявка ' + orderId);
+    } else {
+      cell.clearNote();
+      cell.setBackground(null);
+    }
+    return;
+  }
+
+  if ((col === 9 || col === 10) && CONFIG.AUTO_SET_PAYMENT_STATUS) {
+    if (unpriced === 0 && exactTotal > 0 && eff >= 0 && eff <= 1) {
+      rows.forEach(function (rn) {
+        const cell = sheet.getRange(rn, 11);
+        cell.setValue('Оплата');
+        cell.clearNote();
+        cell.setBackground(null);
+      });
+      _toast('Все позиции рассчитаны. Заявка ' + orderId +
+        ' переведена в "Оплата": ' + exactTotal.toLocaleString('ru-RU') + ' ₽', 'Расчёт завершён');
+    }
+  }
+}
+
+/* ==========================================================================
+   19. ДИАГНОСТИКА
+   ========================================================================== */
+
+function ping() {
+  const ss = getSS();
+  const names = [
+    CONFIG.SHEET_PRODUCTS, CONFIG.SHEET_TC, CONFIG.SHEET_CATALOG,
+    CONFIG.SHEET_ORDERS, CONFIG.SHEET_REQUESTS, CONFIG.SHEET_CAR_REQUESTS,
+    CONFIG.SHEET_ARCHIVE_ORDERS, CONFIG.SHEET_ARCHIVE_REQUESTS
+  ];
+  const sheets = {};
+  names.forEach(function (n) {
+    const sh = ss.getSheetByName(n);
+    sheets[n] = sh ? Math.max(0, sh.getLastRow() - 1) : null;
+  });
+  return _json({
+    status: 'ok',
+    version: CONFIG.VERSION,
+    time: Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'dd.MM.yyyy HH:mm:ss'),
+    spreadsheet: ss.getName(),
+    rows: sheets
+  });
+}
+
+function checkStructure() {
+  const expect = {};
+  expect[CONFIG.SHEET_PRODUCTS] = ['ID', 'Артикул', 'Название', 'Бренд', 'Цена', 'Категория', 'Описание', 'Марка', 'Модель', 'Год', 'Активен', 'Фото'];
+  expect[CONFIG.SHEET_TC] = ['ID', 'Название', 'Город', 'Активна'];
+  expect[CONFIG.SHEET_CATALOG] = ['Марка', 'Модель', 'Год_от', 'Год_до'];
+  expect[CONFIG.SHEET_ORDERS] = ['Дата', 'ID', 'Клиент', 'Телефон', 'VIN', 'Товар', 'Артикул', 'Кол-во', 'Цена', 'Точная сумма', 'Статус', 'ТК', 'Адрес', 'Комментарий', 'Оплата получена'];
+  expect[CONFIG.SHEET_REQUESTS] = ['Дата', 'ID', 'Клиент', 'Телефон', 'VIN', 'Авто', 'Товар', 'Артикул', 'Комментарий', 'Статус'];
+  expect[CONFIG.SHEET_CAR_REQUESTS] = ['Дата', 'Марка', 'Модель', 'Год', 'Статус'];
+
+  const ss = getSS();
+  Logger.log('=== AutoPartsPilot ' + CONFIG.VERSION + ' · проверка структуры ===');
+  Logger.log('Таблица: ' + ss.getName());
+
+  Object.keys(expect).forEach(function (name) {
+    const sh = ss.getSheetByName(name);
+    if (!sh) { Logger.log('❌ НЕТ ЛИСТА: ' + name); return; }
+    const cols = expect[name].length;
+    const header = sh.getLastRow() >= 1 ? sh.getRange(1, 1, 1, cols).getValues()[0] : [];
+    const empty = header.filter(function (h) { return !normalizeText(h); }).length;
+    Logger.log('✅ ' + name + ' · строк данных: ' + Math.max(0, sh.getLastRow() - 1) +
+      ' · нужно столбцов: ' + cols + ' · пустых заголовков: ' + empty);
+  });
+
+  const cat = ss.getSheetByName(CONFIG.SHEET_CATALOG);
+  if (cat && cat.getLastRow() >= 2) {
+    const d = cat.getRange(2, 1, cat.getLastRow() - 1, 4).getValues();
+    let bad = 0;
+    for (let i = 0; i < d.length; i++) {
+      const y1 = parseInt(String(d[i][2] || '').trim(), 10);
+      const y2 = parseInt(String(d[i][3] || '').trim(), 10);
+      if (!normalizeText(d[i][0]) || !normalizeText(d[i][1]) || (!isFinite(y1) && !isFinite(y2))) {
+        bad++;
+        Logger.log('⚠️ Каталог, строка ' + (i + 2) + ': ' + d[i].join(' | '));
+      }
+    }
+    Logger.log('Каталог: проблемных строк ' + bad);
+  }
+
+  Logger.log('=== Готово. Если все листы на месте — можно деплоить. ===');
+}
+
+function testOnEdit() {
+  const sheet = _sheet(CONFIG.SHEET_CAR_REQUESTS);
+  if (!sheet) { Logger.log('Лист "Запросы на авто" не найден'); return; }
+  const data = sheet.getDataRange().getValues();
+  Logger.log('Всего строк: ' + data.length);
+  for (let i = 1; i < data.length; i++) {
+    Logger.log('Строка ' + (i + 1) + ': ' + data[i][1] + ' ' + data[i][2] + ' ' + data[i][3] + ' | статус: ' + data[i][4]);
+  }
+}

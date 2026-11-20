@@ -86,8 +86,10 @@ export const styles = StyleSheet.create({
   tcName: { fontSize: 14, color: '#FFF', fontWeight: '600' },
   tcNameSelected: { color: '#FF6B00' },
   tcCity: { fontSize: 12, color: '#AAA', marginTop: 2 },
-  submitButton: { backgroundColor: '#FF6B00', borderRadius: 10, paddingVertical: 16, alignItems: 'center', marginTop: 8, marginBottom: 20 },
-  submitButtonText: { color: '#FFF', fontSize: 16, fontWeight: 'bold' },
+
+
+    submitButton: { backgroundColor: '#FF6B00', borderRadius: 10, paddingVertical: 16, paddingHorizontal: 16, alignItems: 'center', justifyContent: 'center', minHeight: 52, marginTop: 8, marginBottom: 20 },
+  submitButtonText: { color: '#FFF', fontSize: 16, fontWeight: 'bold', textAlign: 'center', flexShrink: 1, flexWrap: 'wrap', lineHeight: 22 },
   successContainer: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 30 },
   successTitle: { fontSize: 26, fontWeight: 'bold', color: '#FFF', marginTop: 20, marginBottom: 10, textAlign: 'center' },
   successText: { fontSize: 16, color: '#FF6B00', fontWeight: '600', marginBottom: 10, textAlign: 'center' },

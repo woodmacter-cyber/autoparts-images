@@ -3,11 +3,12 @@ import { View, Text, TouchableOpacity, TextInput, ScrollView, Alert, RefreshCont
 import { Ionicons } from '@expo/vector-icons';
 import { styles } from '../styles';
 import { safeNum } from '../helpers/safeNum';
-import { isValidPhone } from '../helpers/phone';
+import { isValidPhone, digitsOnly } from '../helpers/phone';
 import { getStageIndex, getRequestStageIndex, canCancelOrder, canCancelRequest } from '../helpers/stageIndex';
 import { ORDER_STAGES, REQUEST_STAGES } from '../config/stages';
 import { fetchOrders } from '../api/fetchOrders';
 import { fetchRequests } from '../api/fetchRequests';
+import { cancelOrder, deleteOrder } from '../api/archiveOrder';
 import SmartImage from '../components/SmartImage';
 
 // Экран профиля: контакты, гараж, список заявок и запросов
@@ -26,20 +27,36 @@ export default function ProfileScreen({
   const [requests, setRequests] = useState([]);
   const [loading, setLoading] = useState(false);
   const [expandedOrderId, setExpandedOrderId] = useState(null);
+  const [phoneDraft, setPhoneDraft] = useState(profile.phone || '');
 
-  // Загрузка заявок и запросов С ФИЛЬТРАЦИЕЙ ПО ТЕЛЕФОНУ
+  // Загрузка заявок и запросов + фильтрация по цифрам телефона на клиенте
   const loadData = useCallback(async () => {
-    if (!profile.phone) return;
     setLoading(true);
     try {
       const [ordersRes, requestsRes] = await Promise.all([
         fetchOrders(profile.phone),
         fetchRequests(profile.phone),
       ]);
-      if (ordersRes.success) setOrders(ordersRes.data);
-      if (requestsRes.success) setRequests(requestsRes.data);
+
+      const myDigits = digitsOnly(profile.phone);
+      const matchesPhone = (item) => {
+        if (!myDigits) return false;
+        return digitsOnly(item.phone) === myDigits;
+      };
+
+      const allOrders = Array.isArray(ordersRes?.data)
+        ? ordersRes.data.filter(matchesPhone)
+        : [];
+      const allRequests = Array.isArray(requestsRes?.data)
+        ? requestsRes.data.filter(matchesPhone)
+        : [];
+
+      setOrders(allOrders);
+      setRequests(allRequests);
+
+      console.log('📦 Профиль: заявок', allOrders.length, '| запросов', allRequests.length);
     } catch (err) {
-      console.error('Ошибка загрузки:', err);
+      console.error('Ошибка загрузки профиля:', err);
     } finally {
       setLoading(false);
     }
@@ -47,12 +64,63 @@ export default function ProfileScreen({
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  // Отмена заявки
-  const handleCancelOrder = (orderId) => {
-    Alert.alert('Отменить заявку?', 'Менеджер увидит отметку об отмене', [
-      { text: 'Нет', style: 'cancel' },
-      { text: 'Да', onPress: () => onShowToast('Заявка отменена', 'info') },
-    ]);
+  // Применяем введённый телефон и перезагружаем список
+  const applyPhone = () => {
+    if (phoneDraft !== profile.phone) {
+      onUpdateProfile({ ...profile, phone: phoneDraft });
+    } else {
+      loadData();
+    }
+  };
+
+  // Отмена заявки / запроса — реальный запрос на сервер
+  const handleCancel = (item) => {
+    const isRequest = item.type === 'request';
+    Alert.alert(
+      isRequest ? 'Отменить запрос?' : 'Отменить заявку?',
+      'Статус изменится на «Отменена». Менеджер увидит отметку.',
+      [
+        { text: 'Нет', style: 'cancel' },
+        {
+          text: 'Да, отменить',
+          style: 'destructive',
+          onPress: async () => {
+            const res = await cancelOrder(item.id);
+            if (res.success) {
+              onShowToast('Отменено', 'info');
+              loadData();
+            } else {
+              onShowToast(res.message || 'Не удалось отменить', 'error');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  // Удаление заявки / запроса — реальный запрос на сервер
+  const handleDelete = (item) => {
+    const isRequest = item.type === 'request';
+    Alert.alert(
+      isRequest ? 'Удалить запрос?' : 'Удалить заявку?',
+      'Заявка исчезнет из вашего списка. Действие необратимо.',
+      [
+        { text: 'Нет', style: 'cancel' },
+        {
+          text: 'Да, удалить',
+          style: 'destructive',
+          onPress: async () => {
+            const res = await deleteOrder(item.id);
+            if (res.success) {
+              onShowToast('Удалено', 'info');
+              loadData();
+            } else {
+              onShowToast(res.message || 'Не удалось удалить', 'error');
+            }
+          },
+        },
+      ]
+    );
   };
 
   // Рендер трекера этапов заявки
@@ -164,12 +232,26 @@ export default function ProfileScreen({
                 <Text style={styles.orderExactTotalValue}>{order.exactTotal.toLocaleString('ru-RU')} ₽</Text>
               </View>
             )}
-            {!isRequest && canCancelOrder(order.status) && (
-              <TouchableOpacity style={styles.orderCancelButton} onPress={() => handleCancelOrder(order.id)}>
-                <Ionicons name="close-circle" size={18} color="#FF4444" />
-                <Text style={styles.orderCancelButtonText}>Отменить заявку</Text>
+
+            {/* Кнопки действий */}
+            <View style={{ flexDirection: 'row', marginTop: 12 }}>
+              {(isRequest ? canCancelRequest(order.status) : canCancelOrder(order.status)) && (
+                <TouchableOpacity
+                  style={[styles.orderCancelButton, { flex: 1 }]}
+                  onPress={() => handleCancel(order)}
+                >
+                  <Ionicons name="close-circle" size={18} color="#FF4444" />
+                  <Text style={styles.orderCancelButtonText}>Отменить</Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity
+                style={[styles.orderCancelButton, { flex: 1, marginLeft: 8 }]}
+                onPress={() => handleDelete(order)}
+              >
+                <Ionicons name="trash" size={18} color="#FF4444" />
+                <Text style={styles.orderCancelButtonText}>Удалить</Text>
               </TouchableOpacity>
-            )}
+            </View>
           </View>
         )}
       </View>
@@ -203,11 +285,15 @@ export default function ProfileScreen({
           <TextInput
             style={styles.profileInput}
             placeholder="Телефон"
-            value={profile.phone}
-            onChangeText={(v) => onUpdateProfile({ ...profile, phone: v })}
+            value={phoneDraft}
+            onChangeText={setPhoneDraft}
+            onBlur={applyPhone}
             keyboardType="phone-pad"
             placeholderTextColor="#666"
           />
+          <TouchableOpacity style={styles.profileInput} onPress={applyPhone} activeOpacity={0.7}>
+            <Text style={{ color: '#FF6B00', paddingVertical: 4 }}>Обновить список заявок</Text>
+          </TouchableOpacity>
         </View>
       </View>
 

@@ -1,17 +1,24 @@
 import { SCRIPT_URL } from '../config/scriptUrl';
 
-const PROXY = 'https://corsproxy.io/?';
-
 export async function fetchOrders(phone = '') {
   try {
     let url = `${SCRIPT_URL}?action=getOrders`;
     if (phone) url += `&phone=${encodeURIComponent(phone)}`;
-    const targetUrl = encodeURIComponent(url);
-    const response = await fetch(`${PROXY}${targetUrl}`);
-    const data = await response.json();
-    if (data && typeof data === 'object' && !data.error) {
+
+    const response = await fetch(url);
+    const text = await response.text();
+
+    // защита от HTML-ответа (логин Google / ошибка деплоя)
+    if (!text || text.trim().startsWith('<')) {
+      console.error('getOrders: сервер вернул не JSON');
+      return { success: false, data: [] };
+    }
+
+    const data = JSON.parse(text);
+    if (Array.isArray(data)) {
       return { success: true, data };
     }
+    console.error('getOrders: некорректный формат', data);
     return { success: false, data: [] };
   } catch (error) {
     console.error('Ошибка загрузки заявок:', error);
